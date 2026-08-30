@@ -34,7 +34,7 @@ func runMain(args []string) int {
 	var (
 		composeFiles  multiFlag
 		portainerURL  = fs.String("portainer-url", envOr("PINBUMPER_PORTAINER_URL", ""), "Portainer CE base URL (LAN HTTP is fine; Cloudflare can hang)")
-		apiKeyFile    = fs.String("api-key-file", firstNonEmpty(os.Getenv("PORTAINER_API_KEY_FILE"), os.Getenv("PINBUMPER_API_KEY_FILE")), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
+		apiKeyFile    = fs.String("api-key-file", os.Getenv("PORTAINER_API_KEY_FILE"), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
 		stacks        multiFlag
 		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
 		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP client timeout")
@@ -133,7 +133,7 @@ func splitCommand(args []string) (cmd string, rest []string, code int, done bool
 
 func loadAPIKey(file string) (secret.String, error) {
 	if file == "" {
-		file = firstNonEmpty(os.Getenv("PORTAINER_API_KEY_FILE"), os.Getenv("PINBUMPER_API_KEY_FILE"))
+		file = strings.TrimSpace(os.Getenv("PORTAINER_API_KEY_FILE"))
 	}
 	if file != "" {
 		b, err := os.ReadFile(file)
@@ -146,7 +146,7 @@ func loadAPIKey(file string) (secret.String, error) {
 		}
 		return secret.String(k), nil
 	}
-	if k := firstNonEmpty(os.Getenv("PORTAINER_API_KEY"), os.Getenv("PINBUMPER_API_KEY")); k != "" {
+	if k := strings.TrimSpace(os.Getenv("PORTAINER_API_KEY")); k != "" {
 		return secret.String(k), nil
 	}
 	return "", fmt.Errorf("portainer API key required (--api-key-file, PORTAINER_API_KEY_FILE, or PORTAINER_API_KEY)")
@@ -169,15 +169,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if s := strings.TrimSpace(v); s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 func usage(w *os.File) {
@@ -209,10 +200,8 @@ Apply:
   --tls-skip-verify           Skip TLS verify for LAN HTTPS
 
 Environment:
-  PINBUMPER_PORTAINER_URL
-  PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
-  PINBUMPER_API_KEY, PINBUMPER_API_KEY_FILE   (aliases)
-  GITHUB_TOKEN                                Optional, for GHCR rate limits (never logged)
+  PINBUMPER_PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
+  GITHUB_TOKEN                Optional, for GHCR rate limits (never logged)
 
 Unlabeled services are never touched. See README for pinbumper.range / include.
 `)

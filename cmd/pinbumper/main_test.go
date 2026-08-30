@@ -11,8 +11,6 @@ func clearKeyEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PORTAINER_API_KEY", "")
 	t.Setenv("PORTAINER_API_KEY_FILE", "")
-	t.Setenv("PINBUMPER_API_KEY", "")
-	t.Setenv("PINBUMPER_API_KEY_FILE", "")
 }
 
 func TestLoadAPIKeyFromFile(t *testing.T) {
@@ -46,28 +44,13 @@ func TestLoadAPIKeyFromPortainerEnv(t *testing.T) {
 	}
 }
 
-func TestLoadAPIKeyAliasEnv(t *testing.T) {
+func TestLoadAPIKeyIgnoresOldPinbumperNames(t *testing.T) {
 	clearKeyEnv(t)
-	t.Setenv("PINBUMPER_API_KEY", "alias-key")
-	got, err := loadAPIKey("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Unwrap() != "alias-key" {
-		t.Fatalf("got %q", got.Unwrap())
-	}
-}
-
-func TestLoadAPIKeyPrimaryWinsOverAlias(t *testing.T) {
-	clearKeyEnv(t)
-	t.Setenv("PORTAINER_API_KEY", "primary")
-	t.Setenv("PINBUMPER_API_KEY", "alias")
-	got, err := loadAPIKey("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Unwrap() != "primary" {
-		t.Fatalf("got %q", got.Unwrap())
+	t.Setenv("PINBUMPER_API_KEY", "old-name")
+	t.Setenv("PINBUMPER_API_KEY_FILE", "")
+	_, err := loadAPIKey("")
+	if err == nil {
+		t.Fatal("PINBUMPER_API_KEY must not be accepted")
 	}
 }
 
@@ -86,23 +69,6 @@ func TestLoadAPIKeyFileWinsOverRawKey(t *testing.T) {
 	}
 	if got.Unwrap() != "from-file" {
 		t.Fatalf("file should win, got %q", got.Unwrap())
-	}
-}
-
-func TestLoadAPIKeyFileAlias(t *testing.T) {
-	clearKeyEnv(t)
-	dir := t.TempDir()
-	p := filepath.Join(dir, "key")
-	if err := os.WriteFile(p, []byte("alias-file\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PINBUMPER_API_KEY_FILE", p)
-	got, err := loadAPIKey("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Unwrap() != "alias-file" {
-		t.Fatalf("got %q", got.Unwrap())
 	}
 }
 
@@ -150,6 +116,9 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	}
 	if !strings.Contains(text, "dry-run") {
 		t.Fatal("usage must say plan is a dry-run")
+	}
+	if strings.Contains(text, "PINBUMPER_API_KEY") {
+		t.Fatal("usage must not mention PINBUMPER_API_KEY*")
 	}
 }
 
@@ -202,5 +171,8 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	}
 	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") {
 		t.Fatal("weekly example must document the file-based key option")
+	}
+	if strings.Contains(text, "PINBUMPER_API_KEY") {
+		t.Fatal("weekly example must not mention PINBUMPER_API_KEY*")
 	}
 }

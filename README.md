@@ -117,7 +117,7 @@ The key is sent as `X-API-Key` and is never logged. **Both** of these are first-
 1. **`PORTAINER_API_KEY`** — Portainer stack Environment variable (the UI Env array). Portainer stores `Env` on the stack and shows it in the UI.
 2. **`PORTAINER_API_KEY_FILE`** — path to a file that contains the key, bind-mounted into the container.
 
-`PINBUMPER_API_KEY` and `PINBUMPER_API_KEY_FILE` remain aliases. A file path (flag or either `*_API_KEY_FILE`) wins over a raw key.
+A file path (`--api-key-file` or `PORTAINER_API_KEY_FILE`) wins over `PORTAINER_API_KEY`.
 
 ### Portainer stack (no `command:`, no flags)
 

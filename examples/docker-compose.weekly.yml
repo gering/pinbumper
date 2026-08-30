@@ -7,7 +7,6 @@
 #   1) PORTAINER_API_KEY as a Portainer stack Environment variable
 #      (Portainer stores Env on the stack and shows it in the UI).
 #   2) PORTAINER_API_KEY_FILE + bind-mount the key file (see comment below).
-# PINBUMPER_API_KEY / PINBUMPER_API_KEY_FILE are aliases.
 #
 # Schedule outside the container, e.g. cron or a systemd timer:
 #   15 3 * * 1 docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper
