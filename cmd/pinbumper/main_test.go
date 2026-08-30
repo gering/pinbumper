@@ -7,7 +7,16 @@ import (
 	"testing"
 )
 
+func clearKeyEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("PORTAINER_API_KEY", "")
+	t.Setenv("PORTAINER_API_KEY_FILE", "")
+	t.Setenv("PINBUMPER_API_KEY", "")
+	t.Setenv("PINBUMPER_API_KEY_FILE", "")
+}
+
 func TestLoadAPIKeyFromFile(t *testing.T) {
+	clearKeyEnv(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "key")
 	if err := os.WriteFile(p, []byte("  abc123\n"), 0o600); err != nil {
@@ -25,9 +34,9 @@ func TestLoadAPIKeyFromFile(t *testing.T) {
 	}
 }
 
-func TestLoadAPIKeyFromEnv(t *testing.T) {
-	t.Setenv("PINBUMPER_API_KEY_FILE", "")
-	t.Setenv("PINBUMPER_API_KEY", " from-env ")
+func TestLoadAPIKeyFromPortainerEnv(t *testing.T) {
+	clearKeyEnv(t)
+	t.Setenv("PORTAINER_API_KEY", " from-env ")
 	got, err := loadAPIKey("")
 	if err != nil {
 		t.Fatal(err)
@@ -37,9 +46,68 @@ func TestLoadAPIKeyFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadAPIKeyAliasEnv(t *testing.T) {
+	clearKeyEnv(t)
+	t.Setenv("PINBUMPER_API_KEY", "alias-key")
+	got, err := loadAPIKey("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unwrap() != "alias-key" {
+		t.Fatalf("got %q", got.Unwrap())
+	}
+}
+
+func TestLoadAPIKeyPrimaryWinsOverAlias(t *testing.T) {
+	clearKeyEnv(t)
+	t.Setenv("PORTAINER_API_KEY", "primary")
+	t.Setenv("PINBUMPER_API_KEY", "alias")
+	got, err := loadAPIKey("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unwrap() != "primary" {
+		t.Fatalf("got %q", got.Unwrap())
+	}
+}
+
+func TestLoadAPIKeyFileWinsOverRawKey(t *testing.T) {
+	clearKeyEnv(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "key")
+	if err := os.WriteFile(p, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PORTAINER_API_KEY", "from-env")
+	t.Setenv("PORTAINER_API_KEY_FILE", p)
+	got, err := loadAPIKey("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unwrap() != "from-file" {
+		t.Fatalf("file should win, got %q", got.Unwrap())
+	}
+}
+
+func TestLoadAPIKeyFileAlias(t *testing.T) {
+	clearKeyEnv(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "key")
+	if err := os.WriteFile(p, []byte("alias-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PINBUMPER_API_KEY_FILE", p)
+	got, err := loadAPIKey("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unwrap() != "alias-file" {
+		t.Fatalf("got %q", got.Unwrap())
+	}
+}
+
 func TestLoadAPIKeyMissing(t *testing.T) {
-	t.Setenv("PINBUMPER_API_KEY", "")
-	t.Setenv("PINBUMPER_API_KEY_FILE", "")
+	clearKeyEnv(t)
 	_, err := loadAPIKey("")
 	if err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("expected key error, got %v", err)
@@ -52,16 +120,16 @@ func TestSplitCommandDefaultsToApply(t *testing.T) {
 		t.Fatalf("no args: cmd=%q rest=%v code=%d done=%v", cmd, rest, code, done)
 	}
 	cmd, rest, code, done = splitCommand([]string{"--portainer-url", "http://portainer:9000"})
-	if done || cmd != "apply" || len(rest) != 2 || rest[0] != "--portainer-url" {
-		t.Fatalf("flags only: cmd=%q rest=%v done=%v", cmd, rest, done)
+	if done || code != 0 || cmd != "apply" || len(rest) != 2 || rest[0] != "--portainer-url" {
+		t.Fatalf("flags only: cmd=%q rest=%v code=%d done=%v", cmd, rest, code, done)
 	}
-	cmd, rest, _, done = splitCommand([]string{"plan", "--compose-file", "x.yml"})
-	if done || cmd != "plan" || rest[0] != "--compose-file" {
+	cmd, rest, code, done = splitCommand([]string{"plan", "--compose-file", "x.yml"})
+	if done || code != 0 || cmd != "plan" || rest[0] != "--compose-file" {
 		t.Fatalf("explicit plan: cmd=%q rest=%v", cmd, rest)
 	}
-	cmd, rest, _, done = splitCommand([]string{"apply", "--compose-file", "x.yml"})
-	if done || cmd != "apply" {
-		t.Fatalf("explicit apply: cmd=%q", cmd)
+	cmd, rest, code, done = splitCommand([]string{"apply", "--compose-file", "x.yml"})
+	if done || code != 0 || cmd != "apply" || rest[0] != "--compose-file" {
+		t.Fatalf("explicit apply: cmd=%q rest=%v", cmd, rest)
 	}
 }
 
@@ -73,26 +141,23 @@ func TestSplitCommandPlanStillWorks(t *testing.T) {
 }
 
 func TestUsageMentionsPlanAndApply(t *testing.T) {
-	var b strings.Builder
-	// usage writes to *os.File; check the template via a small helper.
 	text := usageString()
 	if !strings.Contains(text, "plan") || !strings.Contains(text, "apply") {
 		t.Fatal("usage must document plan vs apply")
 	}
-	if !strings.Contains(text, "PINBUMPER_API_KEY_FILE") || !strings.Contains(text, "PINBUMPER_API_KEY") {
-		t.Fatal("usage must document both API key options")
+	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") || !strings.Contains(text, "PORTAINER_API_KEY") {
+		t.Fatal("usage must document both Portainer API key options")
 	}
 	if !strings.Contains(text, "dry-run") {
 		t.Fatal("usage must say plan is a dry-run")
 	}
-	_ = b
 }
 
 func usageString() string {
 	return `apply is the default command and the only one that writes. plan is a dry-run.
 The container image CMD is apply (omit command: in a Portainer stack).
-PINBUMPER_API_KEY_FILE
-PINBUMPER_API_KEY`
+PORTAINER_API_KEY_FILE
+PORTAINER_API_KEY`
 }
 
 func TestNoArgsIsApplyNotHelp(t *testing.T) {
@@ -129,10 +194,13 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if strings.Contains(text, "\n    command:") || strings.Contains(text, "\n  command:") {
 		t.Fatal("weekly example must omit command: (image CMD is apply)")
 	}
-	if !strings.Contains(text, "PINBUMPER_PORTAINER_URL") || !strings.Contains(text, "PINBUMPER_API_KEY") {
-		t.Fatal("weekly example must show env-based URL and API key")
+	if !strings.Contains(text, "PINBUMPER_PORTAINER_URL") {
+		t.Fatal("weekly example must keep PINBUMPER_PORTAINER_URL")
 	}
-	if !strings.Contains(text, "PINBUMPER_API_KEY_FILE") {
+	if !strings.Contains(text, "PORTAINER_API_KEY: ${PORTAINER_API_KEY}") {
+		t.Fatal("weekly example must show PORTAINER_API_KEY: ${PORTAINER_API_KEY}")
+	}
+	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") {
 		t.Fatal("weekly example must document the file-based key option")
 	}
 }

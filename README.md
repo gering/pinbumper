@@ -114,8 +114,10 @@ Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or anoth
 
 The key is sent as `X-API-Key` and is never logged. **Both** of these are first-class (pick one):
 
-1. **`PINBUMPER_API_KEY`** — Portainer stack Environment variable (the UI Env array). Portainer stores `Env` on the stack and shows it in the UI.
-2. **`PINBUMPER_API_KEY_FILE`** — path to a file that contains the key, bind-mounted into the container.
+1. **`PORTAINER_API_KEY`** — Portainer stack Environment variable (the UI Env array). Portainer stores `Env` on the stack and shows it in the UI.
+2. **`PORTAINER_API_KEY_FILE`** — path to a file that contains the key, bind-mounted into the container.
+
+`PINBUMPER_API_KEY` and `PINBUMPER_API_KEY_FILE` remain aliases. A file path (flag or either `*_API_KEY_FILE`) wins over a raw key.
 
 ### Portainer stack (no `command:`, no flags)
 
@@ -129,7 +131,7 @@ services:
     image: ghcr.io/gering/pinbumper:0.1.0
     environment:
       PINBUMPER_PORTAINER_URL: http://portainer:9000
-      PINBUMPER_API_KEY: ptr_your_access_token
+      PORTAINER_API_KEY: ${PORTAINER_API_KEY}
 ```
 
 **API key from a file (equal alternative):**
@@ -140,7 +142,7 @@ services:
     image: ghcr.io/gering/pinbumper:0.1.0
     environment:
       PINBUMPER_PORTAINER_URL: http://portainer:9000
-      PINBUMPER_API_KEY_FILE: /run/portainer-key
+      PORTAINER_API_KEY_FILE: /run/portainer-key
     volumes:
       - ./portainer-api.key:/run/portainer-key:ro
 ```
