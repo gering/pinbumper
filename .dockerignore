@@ -1,0 +1,10 @@
+.git
+.github
+*.md
+.gitignore
+.golangci.yml
+coverage.out
+pinbumper
+dist
+.env
+portainer-api.key
