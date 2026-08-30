@@ -1,0 +1,11 @@
+/pinbumper
+/dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+.idea/
+.vscode/
+*.swp
+.env
+portainer-api.key

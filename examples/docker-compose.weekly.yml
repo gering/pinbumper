@@ -1,0 +1,25 @@
+# Weekly pinbumper run against Portainer CE.
+#
+# Schedule outside the container, e.g. cron or a systemd timer:
+#   15 3 * * 1 docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper
+#
+# Dry-run first (recommended):
+#   docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper plan \
+#     --portainer-url "$PORTAINER_URL" --api-key-file /run/portainer-key
+#
+# Do not commit API keys. Point PINBUMPER_API_KEY_FILE at a local secret file.
+
+services:
+  pinbumper:
+    build:
+      context: ..
+    image: pinbumper:local
+    command:
+      - apply
+      - --portainer-url
+      - ${PORTAINER_URL:-http://portainer:9000}
+      - --api-key-file
+      - /run/portainer-key
+    volumes:
+      - ${PINBUMPER_API_KEY_FILE:-./portainer-api.key}:/run/portainer-key:ro
+    restart: "no"
