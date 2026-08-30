@@ -2,7 +2,7 @@
 
 Re-pin **exact** Docker image tags in Compose files and Portainer CE stacks. The image line stays a concrete pin (`ghcr.io/paperless-ngx/paperless-ngx:3.1.0`); the allowed window lives in Compose labels.
 
-`plan` is a dry-run. `apply` is the only command that writes. Unlabeled services are never touched. There is **no auto-rollback**.
+`apply` is the default command and the only one that writes. `plan` is a dry-run. The container image `CMD` is `apply`, so a Portainer stack can omit `command:` entirely. Unlabeled services are never touched. There is **no auto-rollback**.
 
 ## Why not Watchtower or WUD?
 
@@ -101,7 +101,7 @@ pinbumper apply --compose-file docker-compose.yml
 | `pinbumper plan …` | Discover, list tags, print `BUMP` / `NOOP`. **Writes nothing.** |
 | `pinbumper apply …` | Same plan, then rewrite pins and deploy. Non-zero exit on failure. |
 
-There is no implicit apply. If the newest allowed tag is already the current pin, the result is `NOOP`.
+`apply` is the default (`pinbumper --portainer-url …` and the image `CMD`). `plan` is always an explicit dry-run. If the newest allowed tag is already the current pin, the result is `NOOP`.
 
 ## Portainer CE
 
@@ -112,7 +112,40 @@ pinbumper apply --portainer-url http://portainer:9000 --api-key-file ./portainer
 
 Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or another proxy that buffers long requests) can hang stack updates; `--http-timeout` is there for that.
 
-Auth is `X-API-Key` from `--api-key-file`, `PINBUMPER_API_KEY_FILE`, or `PINBUMPER_API_KEY`. The key is never logged.
+The key is sent as `X-API-Key` and is never logged. **Both** of these are first-class (pick one):
+
+1. **`PINBUMPER_API_KEY`** — Portainer stack Environment variable (the UI Env array). Portainer stores `Env` on the stack and shows it in the UI.
+2. **`PINBUMPER_API_KEY_FILE`** — path to a file that contains the key, bind-mounted into the container.
+
+### Portainer stack (no `command:`, no flags)
+
+Image `CMD` is `apply`. Omit `command:` so a stack run applies.
+
+**API key as stack Env:**
+
+```yaml
+services:
+  pinbumper:
+    image: ghcr.io/gering/pinbumper:0.1.0
+    environment:
+      PINBUMPER_PORTAINER_URL: http://portainer:9000
+      PINBUMPER_API_KEY: ptr_your_access_token
+```
+
+**API key from a file (equal alternative):**
+
+```yaml
+services:
+  pinbumper:
+    image: ghcr.io/gering/pinbumper:0.1.0
+    environment:
+      PINBUMPER_PORTAINER_URL: http://portainer:9000
+      PINBUMPER_API_KEY_FILE: /run/portainer-key
+    volumes:
+      - ./portainer-api.key:/run/portainer-key:ro
+```
+
+Dry-run the same image with `docker compose run --rm pinbumper plan` (extra args replace `CMD`).
 
 ### Env pitfall (do not roll your own PUT)
 
@@ -141,21 +174,21 @@ Or build a local image:
 
 ```bash
 docker build -t pinbumper:local .
-docker run --rm pinbumper:local plan --compose-file /work/docker-compose.yml \
-  -v "$PWD:/work:ro"
+docker run --rm -v "$PWD:/work:ro" pinbumper:local plan --compose-file /work/docker-compose.yml
 ```
 
-A weekly Portainer example is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml) (cron / systemd timer; do not commit API keys).
+A weekly Portainer example (env-only, no `command:`) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Schedule with cron or a systemd timer; do not commit API keys.
 
 ## CLI
 
 ```
-pinbumper plan  --portainer-url URL --api-key-file PATH
 pinbumper apply --portainer-url URL --api-key-file PATH
+pinbumper apply --compose-file docker-compose.yml
+pinbumper plan  --portainer-url URL --api-key-file PATH
 pinbumper plan  --compose-file docker-compose.yml
 ```
 
-`--compose-file` and `--portainer-url` can be used together. `--stack NAME` limits Portainer discovery.
+`--compose-file` and `--portainer-url` can be used together. `--stack NAME` limits Portainer discovery. `docker run … plan` / `pinbumper plan` still dry-run; extra container args replace `CMD`.
 
 ## Development
 

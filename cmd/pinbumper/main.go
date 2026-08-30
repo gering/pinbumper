@@ -24,30 +24,17 @@ func main() {
 }
 
 func runMain(args []string) int {
-	if len(args) < 1 {
-		usage(os.Stderr)
-		return 2
-	}
-	switch args[0] {
-	case "version", "-v", "--version":
-		fmt.Printf("pinbumper %s\n", version)
-		return 0
-	case "help", "-h", "--help":
-		usage(os.Stdout)
-		return 0
-	case "plan", "apply":
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
-		usage(os.Stderr)
-		return 2
+	cmd, rest, code, done := splitCommand(args)
+	if done {
+		return code
 	}
 
-	fs := flag.NewFlagSet("pinbumper "+args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet("pinbumper "+cmd, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
 		composeFiles  multiFlag
 		portainerURL  = fs.String("portainer-url", envOr("PINBUMPER_PORTAINER_URL", ""), "Portainer CE base URL (LAN HTTP is fine; Cloudflare can hang)")
-		apiKeyFile    = fs.String("api-key-file", os.Getenv("PINBUMPER_API_KEY_FILE"), "file containing the Portainer X-API-Key")
+		apiKeyFile    = fs.String("api-key-file", os.Getenv("PINBUMPER_API_KEY_FILE"), "file containing the Portainer X-API-Key (or PINBUMPER_API_KEY)")
 		stacks        multiFlag
 		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
 		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP client timeout")
@@ -56,12 +43,12 @@ func runMain(args []string) int {
 	)
 	fs.Var(&composeFiles, "compose-file", "local Compose file to scan (repeatable)")
 	fs.Var(&stacks, "stack", "limit Portainer discovery to these stack names (repeatable)")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return 2
 	}
 
 	mode := run.Plan
-	if args[0] == "apply" {
+	if cmd == "apply" {
 		mode = run.Apply
 	}
 
@@ -118,6 +105,32 @@ func runMain(args []string) int {
 	return 0
 }
 
+// splitCommand defaults to apply when no subcommand is given (including
+// flags-only, so `pinbumper --portainer-url …` and image CMD ["apply"] agree).
+// `plan` remains an explicit dry-run. Returns done=true for version/help/errors.
+func splitCommand(args []string) (cmd string, rest []string, code int, done bool) {
+	if len(args) == 0 {
+		return "apply", nil, 0, false
+	}
+	switch args[0] {
+	case "version", "-v", "--version":
+		fmt.Printf("pinbumper %s\n", version)
+		return "", nil, 0, true
+	case "help", "-h", "--help":
+		usage(os.Stdout)
+		return "", nil, 0, true
+	case "plan", "apply":
+		return args[0], args[1:], 0, false
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			return "apply", args, 0, false
+		}
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
+		usage(os.Stderr)
+		return "", nil, 2, true
+	}
+}
+
 func loadAPIKey(file string) (secret.String, error) {
 	if file == "" {
 		file = os.Getenv("PINBUMPER_API_KEY_FILE")
@@ -162,20 +175,22 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `pinbumper re-pins exact Docker image tags in Compose files and Portainer stacks.
 
 Usage:
-  pinbumper plan  --compose-file docker-compose.yml
-  pinbumper plan  --portainer-url URL --api-key-file PATH
   pinbumper apply --portainer-url URL --api-key-file PATH
   pinbumper apply --compose-file docker-compose.yml
+  pinbumper plan  --portainer-url URL --api-key-file PATH
+  pinbumper plan  --compose-file docker-compose.yml
   pinbumper version
 
-plan is a dry-run (default-safe). apply is the only command that writes.
+apply is the default command and the only one that writes. plan is a dry-run.
+The container image CMD is apply (omit command: in a Portainer stack).
 
 Discovery (at least one):
   --compose-file PATH         Local Compose file (repeatable)
   --portainer-url URL         Portainer CE base URL (http://host:9000 or …/api)
 
-Portainer:
-  --api-key-file PATH         File containing X-API-Key (preferred over env)
+Portainer auth (either option):
+  --api-key-file PATH         File containing X-API-Key (PINBUMPER_API_KEY_FILE)
+  PINBUMPER_API_KEY           Same key as a stack Environment variable
   --stack NAME                Limit to these stack names (repeatable)
 
 Apply:

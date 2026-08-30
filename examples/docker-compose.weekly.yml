@@ -1,25 +1,31 @@
 # Weekly pinbumper run against Portainer CE.
 #
+# The image CMD is apply — do not set command:. Extra args replace CMD
+# (`docker compose run --rm pinbumper plan` is still a dry-run).
+#
+# Auth — both options are first-class (pick one):
+#   1) PINBUMPER_API_KEY as a Portainer stack Environment variable
+#      (Portainer stores Env on the stack and shows it in the UI).
+#   2) PINBUMPER_API_KEY_FILE + bind-mount the key file (see comment below).
+#
 # Schedule outside the container, e.g. cron or a systemd timer:
 #   15 3 * * 1 docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper
 #
-# Dry-run first (recommended):
-#   docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper plan \
-#     --portainer-url "$PORTAINER_URL" --api-key-file /run/portainer-key
-#
-# Do not commit API keys. Point PINBUMPER_API_KEY_FILE at a local secret file.
+# Do not commit API keys.
 
 services:
   pinbumper:
     build:
       context: ..
     image: pinbumper:local
-    command:
-      - apply
-      - --portainer-url
-      - ${PORTAINER_URL:-http://portainer:9000}
-      - --api-key-file
-      - /run/portainer-key
-    volumes:
-      - ${PINBUMPER_API_KEY_FILE:-./portainer-api.key}:/run/portainer-key:ro
+    environment:
+      PINBUMPER_PORTAINER_URL: ${PORTAINER_URL:-http://portainer:9000}
+      PINBUMPER_API_KEY: ${PINBUMPER_API_KEY}
     restart: "no"
+
+# File-based key (equal alternative): drop PINBUMPER_API_KEY and instead set
+#   environment:
+#     PINBUMPER_PORTAINER_URL: ${PORTAINER_URL:-http://portainer:9000}
+#     PINBUMPER_API_KEY_FILE: /run/portainer-key
+#   volumes:
+#     - ${PINBUMPER_API_KEY_FILE:-./portainer-api.key}:/run/portainer-key:ro

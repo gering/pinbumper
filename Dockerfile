@@ -10,4 +10,4 @@ FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/pinbumper /pinbumper
 USER nonroot:nonroot
 ENTRYPOINT ["/pinbumper"]
-CMD ["--help"]
+CMD ["apply"]

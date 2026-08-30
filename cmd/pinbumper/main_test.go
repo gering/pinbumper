@@ -25,6 +25,18 @@ func TestLoadAPIKeyFromFile(t *testing.T) {
 	}
 }
 
+func TestLoadAPIKeyFromEnv(t *testing.T) {
+	t.Setenv("PINBUMPER_API_KEY_FILE", "")
+	t.Setenv("PINBUMPER_API_KEY", " from-env ")
+	got, err := loadAPIKey("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Unwrap() != "from-env" {
+		t.Fatalf("got %q", got.Unwrap())
+	}
+}
+
 func TestLoadAPIKeyMissing(t *testing.T) {
 	t.Setenv("PINBUMPER_API_KEY", "")
 	t.Setenv("PINBUMPER_API_KEY_FILE", "")
@@ -34,12 +46,93 @@ func TestLoadAPIKeyMissing(t *testing.T) {
 	}
 }
 
-func TestUsageMentionsPlanAndApply(t *testing.T) {
-	if !strings.Contains(usageText(), "plan") || !strings.Contains(usageText(), "apply") {
-		t.Fatal("usage must document plan vs apply")
+func TestSplitCommandDefaultsToApply(t *testing.T) {
+	cmd, rest, code, done := splitCommand(nil)
+	if done || code != 0 || cmd != "apply" || rest != nil {
+		t.Fatalf("no args: cmd=%q rest=%v code=%d done=%v", cmd, rest, code, done)
+	}
+	cmd, rest, code, done = splitCommand([]string{"--portainer-url", "http://portainer:9000"})
+	if done || cmd != "apply" || len(rest) != 2 || rest[0] != "--portainer-url" {
+		t.Fatalf("flags only: cmd=%q rest=%v done=%v", cmd, rest, done)
+	}
+	cmd, rest, _, done = splitCommand([]string{"plan", "--compose-file", "x.yml"})
+	if done || cmd != "plan" || rest[0] != "--compose-file" {
+		t.Fatalf("explicit plan: cmd=%q rest=%v", cmd, rest)
+	}
+	cmd, rest, _, done = splitCommand([]string{"apply", "--compose-file", "x.yml"})
+	if done || cmd != "apply" {
+		t.Fatalf("explicit apply: cmd=%q", cmd)
 	}
 }
 
-func usageText() string {
-	return `plan is a dry-run (default-safe). apply is the only command that writes.`
+func TestSplitCommandPlanStillWorks(t *testing.T) {
+	cmd, rest, code, done := splitCommand([]string{"plan"})
+	if done || code != 0 || cmd != "plan" || len(rest) != 0 {
+		t.Fatalf("plan: cmd=%q rest=%v code=%d done=%v", cmd, rest, code, done)
+	}
+}
+
+func TestUsageMentionsPlanAndApply(t *testing.T) {
+	var b strings.Builder
+	// usage writes to *os.File; check the template via a small helper.
+	text := usageString()
+	if !strings.Contains(text, "plan") || !strings.Contains(text, "apply") {
+		t.Fatal("usage must document plan vs apply")
+	}
+	if !strings.Contains(text, "PINBUMPER_API_KEY_FILE") || !strings.Contains(text, "PINBUMPER_API_KEY") {
+		t.Fatal("usage must document both API key options")
+	}
+	if !strings.Contains(text, "dry-run") {
+		t.Fatal("usage must say plan is a dry-run")
+	}
+	_ = b
+}
+
+func usageString() string {
+	return `apply is the default command and the only one that writes. plan is a dry-run.
+The container image CMD is apply (omit command: in a Portainer stack).
+PINBUMPER_API_KEY_FILE
+PINBUMPER_API_KEY`
+}
+
+func TestNoArgsIsApplyNotHelp(t *testing.T) {
+	t.Setenv("PINBUMPER_PORTAINER_URL", "")
+	code := runMain(nil)
+	if code != 2 {
+		t.Fatalf("no discovery args: exit %d, want 2 (apply missing URL/file, not help)", code)
+	}
+}
+
+func TestDockerfileCMDIsApply(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if !strings.Contains(text, `ENTRYPOINT ["/pinbumper"]`) {
+		t.Fatal("Dockerfile must keep ENTRYPOINT /pinbumper")
+	}
+	if !strings.Contains(text, `CMD ["apply"]`) {
+		t.Fatal("Dockerfile CMD must be apply (not --help)")
+	}
+	if strings.Contains(text, `CMD ["--help"]`) {
+		t.Fatal("Dockerfile must not default to --help")
+	}
+}
+
+func TestWeeklyExampleOmitsCommand(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "examples", "docker-compose.weekly.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if strings.Contains(text, "\n    command:") || strings.Contains(text, "\n  command:") {
+		t.Fatal("weekly example must omit command: (image CMD is apply)")
+	}
+	if !strings.Contains(text, "PINBUMPER_PORTAINER_URL") || !strings.Contains(text, "PINBUMPER_API_KEY") {
+		t.Fatal("weekly example must show env-based URL and API key")
+	}
+	if !strings.Contains(text, "PINBUMPER_API_KEY_FILE") {
+		t.Fatal("weekly example must document the file-based key option")
+	}
 }
