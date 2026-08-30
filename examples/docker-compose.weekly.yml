@@ -19,13 +19,13 @@ services:
       context: ..
     image: pinbumper:local
     environment:
-      PINBUMPER_PORTAINER_URL: ${PORTAINER_URL:-http://portainer:9000}
+      PORTAINER_URL: http://192.168.1.16:9000
       PORTAINER_API_KEY: ${PORTAINER_API_KEY}
     restart: "no"
 
 # File-based key (equal alternative): drop PORTAINER_API_KEY and instead set
 #   environment:
-#     PINBUMPER_PORTAINER_URL: ${PORTAINER_URL:-http://portainer:9000}
+#     PORTAINER_URL: http://192.168.1.16:9000
 #     PORTAINER_API_KEY_FILE: /run/portainer-key
 #   volumes:
 #     - ${PORTAINER_API_KEY_FILE:-./portainer-api.key}:/run/portainer-key:ro

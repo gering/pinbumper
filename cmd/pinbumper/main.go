@@ -33,7 +33,7 @@ func runMain(args []string) int {
 	fs.SetOutput(os.Stderr)
 	var (
 		composeFiles  multiFlag
-		portainerURL  = fs.String("portainer-url", envOr("PINBUMPER_PORTAINER_URL", ""), "Portainer CE base URL (LAN HTTP is fine; Cloudflare can hang)")
+		portainerURL  = fs.String("portainer-url", envOr("PORTAINER_URL", ""), "Portainer CE base URL (PORTAINER_URL; LAN HTTP is fine; Cloudflare can hang)")
 		apiKeyFile    = fs.String("api-key-file", os.Getenv("PORTAINER_API_KEY_FILE"), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
 		stacks        multiFlag
 		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
@@ -186,7 +186,7 @@ The container image CMD is apply (omit command: in a Portainer stack).
 
 Discovery (at least one):
   --compose-file PATH         Local Compose file (repeatable)
-  --portainer-url URL         Portainer CE base URL (http://host:9000 or …/api)
+  --portainer-url URL         Portainer CE base URL (or PORTAINER_URL)
 
 Portainer auth (either option):
   --api-key-file PATH         File containing X-API-Key (PORTAINER_API_KEY_FILE)
@@ -200,7 +200,7 @@ Apply:
   --tls-skip-verify           Skip TLS verify for LAN HTTPS
 
 Environment:
-  PINBUMPER_PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
+  PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
   GITHUB_TOKEN                Optional, for GHCR rate limits (never logged)
 
 Unlabeled services are never touched. See README for pinbumper.range / include.

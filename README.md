@@ -130,7 +130,7 @@ services:
   pinbumper:
     image: ghcr.io/gering/pinbumper:0.1.0
     environment:
-      PINBUMPER_PORTAINER_URL: http://portainer:9000
+      PORTAINER_URL: http://192.168.1.16:9000
       PORTAINER_API_KEY: ${PORTAINER_API_KEY}
 ```
 
@@ -141,7 +141,7 @@ services:
   pinbumper:
     image: ghcr.io/gering/pinbumper:0.1.0
     environment:
-      PINBUMPER_PORTAINER_URL: http://portainer:9000
+      PORTAINER_URL: http://192.168.1.16:9000
       PORTAINER_API_KEY_FILE: /run/portainer-key
     volumes:
       - ./portainer-api.key:/run/portainer-key:ro

@@ -114,26 +114,31 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") || !strings.Contains(text, "PORTAINER_API_KEY") {
 		t.Fatal("usage must document both Portainer API key options")
 	}
+	if !strings.Contains(text, "PORTAINER_URL") {
+		t.Fatal("usage must document PORTAINER_URL")
+	}
 	if !strings.Contains(text, "dry-run") {
 		t.Fatal("usage must say plan is a dry-run")
 	}
-	if strings.Contains(text, "PINBUMPER_API_KEY") {
-		t.Fatal("usage must not mention PINBUMPER_API_KEY*")
+	if strings.Contains(text, "PINBUMPER_") {
+		t.Fatal("usage must not mention PINBUMPER_* env vars")
 	}
 }
 
 func usageString() string {
 	return `apply is the default command and the only one that writes. plan is a dry-run.
 The container image CMD is apply (omit command: in a Portainer stack).
+PORTAINER_URL
 PORTAINER_API_KEY_FILE
 PORTAINER_API_KEY`
 }
 
 func TestNoArgsIsApplyNotHelp(t *testing.T) {
-	t.Setenv("PINBUMPER_PORTAINER_URL", "")
+	t.Setenv("PORTAINER_URL", "")
+	t.Setenv("PINBUMPER_PORTAINER_URL", "http://example.invalid:9000")
 	code := runMain(nil)
 	if code != 2 {
-		t.Fatalf("no discovery args: exit %d, want 2 (apply missing URL/file, not help)", code)
+		t.Fatalf("no discovery args: exit %d, want 2 (apply missing URL/file; old PINBUMPER_PORTAINER_URL must be ignored)", code)
 	}
 }
 
@@ -163,8 +168,8 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if strings.Contains(text, "\n    command:") || strings.Contains(text, "\n  command:") {
 		t.Fatal("weekly example must omit command: (image CMD is apply)")
 	}
-	if !strings.Contains(text, "PINBUMPER_PORTAINER_URL") {
-		t.Fatal("weekly example must keep PINBUMPER_PORTAINER_URL")
+	if !strings.Contains(text, "PORTAINER_URL: http://192.168.1.16:9000") {
+		t.Fatal("weekly example must set PORTAINER_URL")
 	}
 	if !strings.Contains(text, "PORTAINER_API_KEY: ${PORTAINER_API_KEY}") {
 		t.Fatal("weekly example must show PORTAINER_API_KEY: ${PORTAINER_API_KEY}")
@@ -172,7 +177,7 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") {
 		t.Fatal("weekly example must document the file-based key option")
 	}
-	if strings.Contains(text, "PINBUMPER_API_KEY") {
-		t.Fatal("weekly example must not mention PINBUMPER_API_KEY*")
+	if strings.Contains(text, "PINBUMPER_") {
+		t.Fatal("weekly example must not mention PINBUMPER_* env vars")
 	}
 }
