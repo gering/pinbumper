@@ -18,7 +18,7 @@ Watchtower is the right tool if you want “keep this running tag up to date.”
 
 ## Pin syntax (both supported)
 
-Labels go on the **service**. The `image:` value must already be an exact tag, not `latest` and not `${VAR}`.
+Labels go on the **service**. The `image:` value must already be an exact tag, not `latest` and not `${VAR}`. Digest-only pins (`image@sha256:…` with no tag) are skipped. If a tag+digest is rewritten, the `@digest` is dropped and only the new tag is written.
 
 ### 1. Semver (npm / Renovate) — default when `pinbumper.range` is set
 
@@ -113,6 +113,10 @@ pinbumper apply --portainer-url http://portainer:9000 --api-key-file ./portainer
 Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or another proxy that buffers long requests) can hang stack updates.
 
 `--http-timeout` (default 60s) applies to **tag listing** and Portainer GET. Portainer `PUT` (pull + redeploy) uses `--deploy-timeout` (default 30m, `0` disables the client deadline). A 60s abort mid-PUT can leave the stack half-applied; there is no rollback.
+
+`--tls-skip-verify` applies to **Portainer only** (LAN HTTPS). Docker Hub / GHCR keep TLS verification.
+
+A weekly unfiltered run (no `--stack`) **skips** stacks it cannot read or parse (invalid labels, missing stack file, git-backed) and continues with the rest. Git-backed stacks are never PUT.
 
 The key is sent as `X-API-Key` and is never logged. **Both** of these are first-class (pick one):
 

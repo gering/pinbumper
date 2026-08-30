@@ -185,6 +185,77 @@ services:
 	}
 }
 
+func TestBadStackDoesNotAbortGoodStack(t *testing.T) {
+	const goodYAML = `
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.0
+    labels:
+      pinbumper.range: "^3.1.0"
+`
+	const badYAML = `
+services:
+  other:
+    image: example/other:1.0.0
+    labels:
+      pinbumper.exclude: ".*-rc.*"
+`
+	var putIDs []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks":
+			_ = json.NewEncoder(w).Encode([]portainer.Stack{
+				{ID: 1, Name: "broken", Type: portainer.TypeCompose, EndpointID: 1},
+				{ID: 2, Name: "paperless", Type: portainer.TypeCompose, EndpointID: 1,
+					Env: []portainer.EnvVar{{Name: "K", Value: "V"}}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/1/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: badYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/2/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: goodYAML})
+		case r.Method == http.MethodPut:
+			putIDs = append(putIDs, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	client, err := portainer.New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	err = Run(context.Background(), Options{
+		Mode: Plan, Portainer: client, Tags: paperlessLister(),
+		Stdout: &out, Stderr: &errb,
+	})
+	if err != nil {
+		t.Fatalf("plan must not fail because of the bad stack: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "3.1.0 -> 3.1.1") {
+		t.Fatalf("good stack not planned:\n%s", out.String())
+	}
+	if !strings.Contains(errb.String(), "skip portainer/broken") {
+		t.Fatalf("bad stack should be skipped and logged:\n%s", errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	putIDs = nil
+	err = Run(context.Background(), Options{
+		Mode: Apply, Portainer: client, Tags: paperlessLister(), PullImage: true,
+		Stdout: &out, Stderr: &errb,
+	})
+	if err != nil {
+		t.Fatalf("apply must not fail because of the bad stack: %v\n%s", err, errb.String())
+	}
+	if len(putIDs) != 1 || !strings.Contains(putIDs[0], "/stacks/2") {
+		t.Fatalf("should PUT only the good stack, got %v", putIDs)
+	}
+}
+
 func TestExactPinNoopDoesNotPUT(t *testing.T) {
 	const y = `
 services:
@@ -307,6 +378,10 @@ func TestPickComposeRowSkipsStaleImage(t *testing.T) {
 	_, ok = pickComposeRow(rows[:1], "paperless", "3.1.1")
 	if ok {
 		t.Fatal("old pin only must not match new tag")
+	}
+	_, ok = pickComposeRow([]composePSRow{{Service: "paperless", Image: "", State: "running"}}, "paperless", "3.1.1")
+	if ok {
+		t.Fatal("empty Image must not match when wantTag is set")
 	}
 }
 

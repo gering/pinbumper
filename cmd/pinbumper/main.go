@@ -40,7 +40,7 @@ func runMain(args []string) int {
 		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
 		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP timeout for tag listing and Portainer GET")
 		deployTimeout = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
-		tlsSkip       = fs.Bool("tls-skip-verify", false, "skip TLS certificate verify (LAN HTTPS)")
+		tlsSkip       = fs.Bool("tls-skip-verify", false, "skip TLS verify for Portainer only (LAN HTTPS)")
 		skipDeploy    = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
 	)
 	fs.Var(&composeFiles, "compose-file", "local Compose file to scan (repeatable)")
@@ -59,18 +59,12 @@ func runMain(args []string) int {
 		return 2
 	}
 
-	httpClient := &http.Client{Timeout: *httpTimeout}
-	if *tlsSkip {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		}
-	}
-
+	registryClient := &http.Client{Timeout: *httpTimeout}
 	opt := run.Options{
 		Mode:          mode,
 		ComposeFiles:  composeFiles,
 		StackFilter:   stacks,
-		Tags:          registry.NewClient(httpClient),
+		Tags:          registry.NewClient(registryClient),
 		SkipDeploy:    *skipDeploy,
 		PullImage:     true,
 		HealthTimeout: *healthTimeout,
@@ -90,13 +84,19 @@ func runMain(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 2
 		}
-		pc, err := portainer.New(*portainerURL, key, httpClient)
+		portainerHTTP := &http.Client{Timeout: *httpTimeout}
+		if *tlsSkip {
+			portainerHTTP.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			}
+		}
+		pc, err := portainer.New(*portainerURL, key, portainerHTTP)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 2
 		}
 		pc.MutateTimeout = *deployTimeout
-		pc.MutateHTTP = &http.Client{Timeout: *deployTimeout, Transport: httpClient.Transport}
+		pc.MutateHTTP = &http.Client{Timeout: *deployTimeout, Transport: portainerHTTP.Transport}
 		opt.Portainer = pc
 	}
 
@@ -202,7 +202,7 @@ Apply:
   --skip-deploy               Rewrite local files only; no compose up, no Portainer PUT
   --http-timeout DURATION     Tag listing / Portainer GET (default 60s)
   --deploy-timeout DURATION   Portainer PUT pull+redeploy (default 30m; 0 = none)
-  --tls-skip-verify           Skip TLS verify for LAN HTTPS
+  --tls-skip-verify           Skip TLS verify for Portainer only (LAN HTTPS)
 
 Environment:
   PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE

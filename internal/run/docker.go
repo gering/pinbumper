@@ -104,7 +104,7 @@ func pickComposeRow(rows []composePSRow, service, wantTag string) (composePSRow,
 		if service != "" && r.Service != "" && !strings.EqualFold(r.Service, service) {
 			continue
 		}
-		if wantTag != "" && r.Image != "" && !strings.HasSuffix(r.Image, ":"+wantTag) {
+		if wantTag != "" && (r.Image == "" || !strings.HasSuffix(r.Image, ":"+wantTag)) {
 			continue
 		}
 		best = r

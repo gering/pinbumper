@@ -114,7 +114,10 @@ func Run(ctx context.Context, opt Options) error {
 		return err
 	}
 	if len(docs) == 0 {
-		return fmt.Errorf("nothing to scan: pass --compose-file and/or --portainer-url")
+		if len(opt.ComposeFiles) == 0 && opt.Portainer == nil {
+			return fmt.Errorf("nothing to scan: pass --compose-file and/or --portainer-url")
+		}
+		return nil
 	}
 
 	var (
@@ -233,17 +236,19 @@ func load(ctx context.Context, opt Options) ([]loaded, error) {
 			fmt.Fprintf(opt.errw(), "skip portainer/%s: unsupported type %d\n", st.Name, st.Type)
 			continue
 		}
-		if st.GitConfig != nil && st.GitConfig.URL != "" {
+		if st.GitConfig != nil {
 			fmt.Fprintf(opt.errw(), "skip portainer/%s: git-backed stack (PUT would detach git)\n", st.Name)
 			continue
 		}
 		text, err := opt.Portainer.StackFile(ctx, st.ID)
 		if err != nil {
-			return nil, fmt.Errorf("portainer stack %s file: %w", st.Name, err)
+			fmt.Fprintf(opt.errw(), "skip portainer/%s: stack file: %v\n", st.Name, err)
+			continue
 		}
 		f, err := compose.Parse(text)
 		if err != nil {
-			return nil, fmt.Errorf("portainer stack %s: %w", st.Name, err)
+			fmt.Fprintf(opt.errw(), "skip portainer/%s: %v\n", st.Name, err)
+			continue
 		}
 		src := Source{
 			Kind:      "portainer",
