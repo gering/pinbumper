@@ -59,7 +59,7 @@ When **only** include/exclude is set, pinbumper picks the newest tag that matche
 
 ### Combining both
 
-If `pinbumper.range` **and** `pinbumper.include` are set, a candidate must satisfy **both** (semver range **and** regex). `exclude` always denylists.
+If `pinbumper.range` **and** `pinbumper.include` are set, a candidate must satisfy **both** (semver range **and** regex). `exclude` always denylists. `pinbumper.exclude` alone is invalid (it would otherwise allow `latest`).
 
 List-form labels work the same:
 
@@ -110,7 +110,9 @@ pinbumper plan  --portainer-url http://portainer:9000 --api-key-file ./portainer
 pinbumper apply --portainer-url http://portainer:9000 --api-key-file ./portainer-api.key
 ```
 
-Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or another proxy that buffers long requests) can hang stack updates; `--http-timeout` is there for that.
+Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or another proxy that buffers long requests) can hang stack updates.
+
+`--http-timeout` (default 60s) applies to **tag listing** and Portainer GET. Portainer `PUT` (pull + redeploy) uses `--deploy-timeout` (default 30m, `0` disables the client deadline). A 60s abort mid-PUT can leave the stack half-applied; there is no rollback.
 
 The key is sent as `X-API-Key` and is never logged. **Both** of these are first-class (pick one):
 
@@ -191,6 +193,8 @@ pinbumper plan  --compose-file docker-compose.yml
 ```
 
 `--compose-file` and `--portainer-url` can be used together. `--stack NAME` limits Portainer discovery. `docker run … plan` / `pinbumper plan` still dry-run; extra container args replace `CMD`.
+
+`--skip-deploy` rewrites **local** Compose files only. It does **not** `docker compose up` and does **not** PUT Portainer stacks.
 
 ## Development
 

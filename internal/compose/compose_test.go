@@ -65,6 +65,19 @@ services:
 	}
 }
 
+func TestExcludeOnlyRejected(t *testing.T) {
+	const y = `
+services:
+  app:
+    image: example/app:1.0.0
+    labels:
+      pinbumper.exclude: ".*-rc.*"
+`
+	if _, err := Parse(y); err == nil {
+		t.Fatal("exclude-only labels must be invalid")
+	}
+}
+
 func TestUnlabeledNeverReturned(t *testing.T) {
 	const y = `
 services:

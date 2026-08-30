@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,9 +38,10 @@ func runMain(args []string) int {
 		apiKeyFile    = fs.String("api-key-file", os.Getenv("PORTAINER_API_KEY_FILE"), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
 		stacks        multiFlag
 		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
-		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP client timeout")
+		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP timeout for tag listing and Portainer GET")
+		deployTimeout = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
 		tlsSkip       = fs.Bool("tls-skip-verify", false, "skip TLS certificate verify (LAN HTTPS)")
-		skipDeploy    = fs.Bool("skip-deploy", false, "rewrite files/stacks only; do not docker compose up")
+		skipDeploy    = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
 	)
 	fs.Var(&composeFiles, "compose-file", "local Compose file to scan (repeatable)")
 	fs.Var(&stacks, "stack", "limit Portainer discovery to these stack names (repeatable)")
@@ -93,6 +95,8 @@ func runMain(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 2
 		}
+		pc.MutateTimeout = *deployTimeout
+		pc.MutateHTTP = &http.Client{Timeout: *deployTimeout, Transport: httpClient.Transport}
 		opt.Portainer = pc
 	}
 
@@ -171,7 +175,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func usage(w *os.File) {
+func usage(w io.Writer) {
 	fmt.Fprint(w, `pinbumper re-pins exact Docker image tags in Compose files and Portainer stacks.
 
 Usage:
@@ -195,8 +199,9 @@ Portainer auth (either option):
 
 Apply:
   --health-timeout DURATION   Wait for healthchecks (default 10m). No rollback.
-  --skip-deploy               Rewrite only; do not docker compose up
-  --http-timeout DURATION     HTTP timeout (default 60s)
+  --skip-deploy               Rewrite local files only; no compose up, no Portainer PUT
+  --http-timeout DURATION     Tag listing / Portainer GET (default 60s)
+  --deploy-timeout DURATION   Portainer PUT pull+redeploy (default 30m; 0 = none)
   --tls-skip-verify           Skip TLS verify for LAN HTTPS
 
 Environment:

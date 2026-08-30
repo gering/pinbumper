@@ -70,7 +70,7 @@ type Options struct {
 // Deployer recreates local compose services after a file rewrite.
 type Deployer interface {
 	Up(ctx context.Context, composeFile string, services []string) error
-	Health(ctx context.Context, composeFile, service string) (Health, error)
+	Health(ctx context.Context, composeFile, service, wantTag string) (Health, error)
 }
 
 // Health is a container's runtime health.
@@ -322,7 +322,7 @@ func documentText(docs []loaded, src Source) string {
 func applyDoc(ctx context.Context, opt Options, src Source, text string, group []Decision) error {
 	switch src.Kind {
 	case "local":
-		if err := os.WriteFile(src.Path, []byte(text), 0o644); err != nil {
+		if err := writeComposeFile(src.Path, text); err != nil {
 			return err
 		}
 		fmt.Fprintf(opt.out(), "wrote  %s\n", src.Path)
@@ -341,14 +341,19 @@ func applyDoc(ctx context.Context, opt Options, src Source, text string, group [
 		}
 		return waitLocal(ctx, opt, src, group)
 	case "portainer":
+		if opt.SkipDeploy {
+			fmt.Fprintf(opt.out(), "skip-deploy: not PUTting portainer stack %s\n", src.Stack.Name)
+			return nil
+		}
 		if opt.Portainer == nil {
 			return fmt.Errorf("portainer client missing")
 		}
+		putAt := time.Now().Add(-2 * time.Second).Unix() // clock skew / second granularity
 		if err := opt.Portainer.UpdateStack(ctx, src.Stack, text, opt.PullImage); err != nil {
 			return err
 		}
 		fmt.Fprintf(opt.out(), "updated portainer stack %s (id %d)\n", src.Stack.Name, src.Stack.ID)
-		return waitPortainer(ctx, opt, src, group)
+		return waitPortainer(ctx, opt, src, group, putAt)
 	default:
 		return fmt.Errorf("unknown source %s", src.Kind)
 	}
@@ -366,7 +371,7 @@ func waitLocal(ctx context.Context, opt Options, src Source, group []Decision) e
 	}
 	return poll(ctx, opt, func(ctx context.Context) (bool, error) {
 		for _, d := range need {
-			h, err := opt.Deploy.Health(ctx, src.Path, d.Service.Name)
+			h, err := opt.Deploy.Health(ctx, src.Path, d.Service.Name, d.To)
 			if err != nil {
 				return false, err
 			}
@@ -378,7 +383,7 @@ func waitLocal(ctx context.Context, opt Options, src Source, group []Decision) e
 	})
 }
 
-func waitPortainer(ctx context.Context, opt Options, src Source, group []Decision) error {
+func waitPortainer(ctx context.Context, opt Options, src Source, group []Decision, createdAfter int64) error {
 	var need []Decision
 	for _, d := range group {
 		if d.Service.HasHealthcheck {
@@ -394,13 +399,7 @@ func waitPortainer(ctx context.Context, opt Options, src Source, group []Decisio
 			return false, err
 		}
 		for _, d := range need {
-			var match *portainer.Container
-			for i := range ctrs {
-				if portainer.MatchesStack(ctrs[i], src.Stack.Name, d.Service.Name) {
-					match = &ctrs[i]
-					break
-				}
-			}
+			match := portainer.SelectContainer(ctrs, src.Stack.Name, d.Service.Name, d.To, createdAfter)
 			if match == nil {
 				return false, nil
 			}
@@ -430,14 +429,14 @@ func healthOutcome(h Health) (done bool, err error) {
 	if !h.Found {
 		return false, nil
 	}
-	if !h.Running && strings.EqualFold(h.State, "exited") {
-		return true, fmt.Errorf("container exited (exit %d); no rollback", h.ExitCode)
-	}
-	if !h.HasCheck {
-		if h.Running {
-			return true, nil
+	if !h.Running {
+		if strings.EqualFold(h.State, "exited") || strings.EqualFold(h.State, "dead") {
+			return true, fmt.Errorf("container %s (exit %d); no rollback", h.State, h.ExitCode)
 		}
 		return false, nil
+	}
+	if !h.HasCheck {
+		return true, nil
 	}
 	switch strings.ToLower(h.Status) {
 	case "healthy":
@@ -447,6 +446,14 @@ func healthOutcome(h Health) (done bool, err error) {
 	default:
 		return false, nil
 	}
+}
+
+func writeComposeFile(path, text string) error {
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	return os.WriteFile(path, []byte(text), mode)
 }
 
 func poll(ctx context.Context, opt Options, fn func(context.Context) (bool, error)) error {

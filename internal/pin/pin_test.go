@@ -1,6 +1,7 @@
 package pin
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -147,5 +148,18 @@ func TestInvalidSpecs(t *testing.T) {
 	}
 	if _, err := New("", "(", ""); err == nil {
 		t.Fatal("bad include should error")
+	}
+}
+
+func TestExcludeOnlyRejected(t *testing.T) {
+	_, err := New("", "", ".*-rc.*")
+	if err == nil || !strings.Contains(err.Error(), "exclude requires") {
+		t.Fatalf("exclude-only must be invalid config, got %v", err)
+	}
+	if _, err := New("^1.0.0", "", ".*-rc.*"); err != nil {
+		t.Fatalf("exclude with range must be allowed: %v", err)
+	}
+	if _, err := New("", `^v`, ".*-rc.*"); err != nil {
+		t.Fatalf("exclude with include must be allowed: %v", err)
 	}
 }

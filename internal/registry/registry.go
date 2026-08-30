@@ -103,7 +103,12 @@ func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, er
 	base := strings.TrimRight(c.HubBase, "/")
 	u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=100", base, image.Path)
 	var tags []string
+	pages := 0
 	for u != "" {
+		pages++
+		if pages > 50 {
+			return nil, fmt.Errorf("docker hub %s: too many tag pages", image.Path)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err

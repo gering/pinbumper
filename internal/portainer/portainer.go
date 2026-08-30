@@ -57,13 +57,19 @@ type UpdatePayload struct {
 	Prune                  bool     `json:"Prune"`
 }
 
+// DefaultMutateTimeout covers Portainer PUT pull+redeploy (Paperless-sized images).
+// Tag listing and GET stay on the short HTTP client timeout.
+const DefaultMutateTimeout = 30 * time.Minute
+
 // Container is a Docker container as returned via the Portainer proxy.
 type Container struct {
-	ID     string            `json:"Id"`
-	Names  []string          `json:"Names"`
-	State  string            `json:"State"`
-	Labels map[string]string `json:"Labels"`
-	Status string            `json:"Status"`
+	ID      string            `json:"Id"`
+	Names   []string          `json:"Names"`
+	Image   string            `json:"Image"`
+	Created int64             `json:"Created"`
+	State   string            `json:"State"`
+	Labels  map[string]string `json:"Labels"`
+	Status  string            `json:"Status"`
 }
 
 // InspectState is the subset of docker inspect we need for health.
@@ -80,10 +86,12 @@ type InspectState struct {
 
 // Client calls Portainer CE. The API key is never logged.
 type Client struct {
-	BaseURL   string
-	APIKey    secret.String
-	HTTP      *http.Client
-	UserAgent string
+	BaseURL       string
+	APIKey        secret.String
+	HTTP          *http.Client // short timeout: GET list/file/inspect
+	MutateHTTP    *http.Client // long timeout: PUT stack (pull+deploy)
+	MutateTimeout time.Duration
+	UserAgent     string
 }
 
 func New(baseURL string, key secret.String, httpClient *http.Client) (*Client, error) {
@@ -94,7 +102,13 @@ func New(baseURL string, key secret.String, httpClient *http.Client) (*Client, e
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &Client{BaseURL: u, APIKey: key, HTTP: httpClient, UserAgent: "pinbumper/0.1.0"}, nil
+	return &Client{
+		BaseURL:       u,
+		APIKey:        key,
+		HTTP:          httpClient,
+		MutateTimeout: DefaultMutateTimeout,
+		UserAgent:     "pinbumper/0.1.0",
+	}, nil
 }
 
 // NormalizeBaseURL accepts http://host:9000 or http://host:9000/api.
@@ -148,7 +162,7 @@ func (c *Client) UpdateStack(ctx context.Context, stack Stack, compose string, p
 		return err
 	}
 	path := fmt.Sprintf("/stacks/%d?endpointId=%d", stack.ID, stack.EndpointID)
-	return c.do(ctx, http.MethodPut, path, body, nil)
+	return c.do(ctx, http.MethodPut, path, body, nil, true)
 }
 
 func (c *Client) ListContainers(ctx context.Context, endpointID int) ([]Container, error) {
@@ -170,10 +184,24 @@ func (c *Client) InspectContainer(ctx context.Context, endpointID int, container
 }
 
 func (c *Client) get(ctx context.Context, path string, dest any) error {
-	return c.do(ctx, http.MethodGet, path, nil, dest)
+	return c.do(ctx, http.MethodGet, path, nil, dest, false)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, body []byte, dest any) error {
+func (c *Client) httpFor(mutate bool) *http.Client {
+	if !mutate {
+		return c.HTTP
+	}
+	if c.MutateHTTP != nil {
+		return c.MutateHTTP
+	}
+	timeout := c.MutateTimeout
+	if timeout == 0 {
+		timeout = DefaultMutateTimeout
+	}
+	return &http.Client{Timeout: timeout, Transport: c.HTTP.Transport}
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body []byte, dest any, mutate bool) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -186,7 +214,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, dest 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	res, err := c.HTTP.Do(req)
+	res, err := c.httpFor(mutate).Do(req)
 	if err != nil {
 		return fmt.Errorf("portainer %s %s: %w", method, redactPath(path), err)
 	}
@@ -196,7 +224,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, dest 
 		return err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("portainer %s %s: %s", method, redactPath(path), res.Status)
+		return fmt.Errorf("portainer %s %s: %s: %s", method, redactPath(path), res.Status, portainerMessage(payload))
 	}
 	if dest == nil || len(payload) == 0 {
 		return nil
@@ -208,9 +236,70 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, dest 
 }
 
 func redactPath(p string) string {
-	// path never includes the API key; keep the helper so callers do not
-	// accidentally log the request.
 	return p
+}
+
+func portainerMessage(body []byte) string {
+	var m struct {
+		Message string `json:"message"`
+		Details string `json:"details"`
+	}
+	if json.Unmarshal(body, &m) == nil && strings.TrimSpace(m.Message) != "" {
+		msg := strings.TrimSpace(m.Message)
+		if d := strings.TrimSpace(m.Details); d != "" {
+			msg = msg + ": " + d
+		}
+		return truncate(msg, 500)
+	}
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return ""
+	}
+	return truncate(s, 500)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+// ImageTag is the tag portion of a Docker image reference (after the last
+// colon that follows the last slash). Digest-only refs have no tag.
+func ImageTag(image string) string {
+	image = strings.TrimSpace(image)
+	if i := strings.Index(image, "@"); i >= 0 {
+		image = image[:i]
+	}
+	slash := strings.LastIndex(image, "/")
+	colon := strings.LastIndex(image, ":")
+	if colon > slash {
+		return image[colon+1:]
+	}
+	return ""
+}
+
+// SelectContainer picks the post-redeploy container for a service: stack+service
+// and (image tag == wantTag OR Created >= createdAfter). The newest Created
+// wins. Callers must still require Running before treating health as success.
+func SelectContainer(ctrs []Container, stackName, service, wantTag string, createdAfter int64) *Container {
+	var best *Container
+	for i := range ctrs {
+		c := &ctrs[i]
+		if !MatchesStack(*c, stackName, service) {
+			continue
+		}
+		tagOK := wantTag != "" && ImageTag(c.Image) == wantTag
+		newOK := createdAfter > 0 && c.Created >= createdAfter
+		if !tagOK && !newOK {
+			continue
+		}
+		if best == nil || c.Created > best.Created {
+			best = c
+		}
+	}
+	return best
 }
 
 // MatchesStack reports whether a container belongs to a Portainer compose stack.

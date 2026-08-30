@@ -62,8 +62,11 @@ func New(rangeSpec, include, exclude string) (Selector, error) {
 		}
 		s.excludeRE = re
 	}
-	if !s.Active() {
-		return Selector{}, fmt.Errorf("no pinbumper.range, pinbumper.include, or pinbumper.exclude")
+	if s.Range == "" && include == "" {
+		if exclude != "" {
+			return Selector{}, fmt.Errorf("pinbumper.exclude requires pinbumper.range or pinbumper.include")
+		}
+		return Selector{}, fmt.Errorf("no pinbumper.range or pinbumper.include")
 	}
 	return s, nil
 }

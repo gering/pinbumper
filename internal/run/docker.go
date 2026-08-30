@@ -52,7 +52,7 @@ func (d DockerDeployer) Up(ctx context.Context, composeFile string, services []s
 	return nil
 }
 
-func (d DockerDeployer) Health(ctx context.Context, composeFile, service string) (Health, error) {
+func (d DockerDeployer) Health(ctx context.Context, composeFile, service, wantTag string) (Health, error) {
 	out, err := d.compose(ctx, composeFile, "ps", "-a", "--format", "json", service)
 	if err != nil {
 		return Health{}, fmt.Errorf("compose ps: %w: %s", err, strings.TrimSpace(string(out)))
@@ -62,28 +62,21 @@ func (d DockerDeployer) Health(ctx context.Context, composeFile, service string)
 		return Health{Found: false}, nil
 	}
 	// docker compose may emit a JSON array or NDJSON objects.
-	type row struct {
-		Service string `json:"Service"`
-		State   string `json:"State"`
-		Health  string `json:"Health"`
-		Exit    int    `json:"ExitCode"`
-		Name    string `json:"Name"`
-	}
-	var rows []row
+	var rows []composePSRow
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		for dec.More() {
-			var r row
+			var r composePSRow
 			if err := dec.Decode(&r); err != nil {
 				return Health{}, fmt.Errorf("compose ps json: %w", err)
 			}
 			rows = append(rows, r)
 		}
 	}
-	if len(rows) == 0 {
+	r, ok := pickComposeRow(rows, service, wantTag)
+	if !ok {
 		return Health{Found: false}, nil
 	}
-	r := rows[0]
 	h := Health{
 		Found:    true,
 		State:    r.State,
@@ -93,4 +86,29 @@ func (d DockerDeployer) Health(ctx context.Context, composeFile, service string)
 		HasCheck: r.Health != "" && !strings.EqualFold(r.Health, "none"),
 	}
 	return h, nil
+}
+
+type composePSRow struct {
+	Service string `json:"Service"`
+	State   string `json:"State"`
+	Health  string `json:"Health"`
+	Image   string `json:"Image"`
+	Exit    int    `json:"ExitCode"`
+	Name    string `json:"Name"`
+}
+
+func pickComposeRow(rows []composePSRow, service, wantTag string) (composePSRow, bool) {
+	var best composePSRow
+	found := false
+	for _, r := range rows {
+		if service != "" && r.Service != "" && !strings.EqualFold(r.Service, service) {
+			continue
+		}
+		if wantTag != "" && r.Image != "" && !strings.HasSuffix(r.Image, ":"+wantTag) {
+			continue
+		}
+		best = r
+		found = true
+	}
+	return best, found
 }

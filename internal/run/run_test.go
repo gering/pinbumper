@@ -230,6 +230,86 @@ services:
 	}
 }
 
+func TestApplySkipDeployDoesNotPUT(t *testing.T) {
+	const stackYAML = `
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.0
+    labels:
+      pinbumper.range: "^3.1.0"
+`
+	puts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks":
+			_ = json.NewEncoder(w).Encode([]portainer.Stack{{
+				ID: 3, Name: "paperless", Type: portainer.TypeCompose, EndpointID: 1,
+				Env: []portainer.EnvVar{{Name: "K", Value: "V"}},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/3/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: stackYAML})
+		case r.Method == http.MethodPut:
+			puts++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	client, err := portainer.New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Run(context.Background(), Options{
+		Mode:       Apply,
+		Portainer:  client,
+		Tags:       paperlessLister(),
+		SkipDeploy: true,
+		PullImage:  true,
+		Stdout:     io.Discard,
+		Stderr:     io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if puts != 0 {
+		t.Fatalf("skip-deploy must not PUT, got %d", puts)
+	}
+}
+
+func TestWriteComposePreservesMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "docker-compose.yml")
+	if err := os.WriteFile(path, []byte("old: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeComposeFile(path, "new: 2\n"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o, want 0600", st.Mode().Perm())
+	}
+}
+
+func TestPickComposeRowSkipsStaleImage(t *testing.T) {
+	rows := []composePSRow{
+		{Service: "paperless", Image: "ghcr.io/paperless-ngx/paperless-ngx:3.1.0", State: "running", Health: "healthy"},
+		{Service: "paperless", Image: "ghcr.io/paperless-ngx/paperless-ngx:3.1.1", State: "running", Health: "starting"},
+	}
+	got, ok := pickComposeRow(rows, "paperless", "3.1.1")
+	if !ok || !strings.HasSuffix(got.Image, ":3.1.1") {
+		t.Fatalf("want new pin, got %+v ok=%v", got, ok)
+	}
+	_, ok = pickComposeRow(rows[:1], "paperless", "3.1.1")
+	if ok {
+		t.Fatal("old pin only must not match new tag")
+	}
+}
+
 func TestHealthUnhealthyNoRollback(t *testing.T) {
 	h := Health{Found: true, Running: true, HasCheck: true, Status: "unhealthy"}
 	done, err := healthOutcome(h)

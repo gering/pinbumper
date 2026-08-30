@@ -107,7 +107,9 @@ func TestSplitCommandPlanStillWorks(t *testing.T) {
 }
 
 func TestUsageMentionsPlanAndApply(t *testing.T) {
-	text := usageString()
+	var buf strings.Builder
+	usage(&buf)
+	text := buf.String()
 	if !strings.Contains(text, "plan") || !strings.Contains(text, "apply") {
 		t.Fatal("usage must document plan vs apply")
 	}
@@ -120,17 +122,12 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if !strings.Contains(text, "dry-run") {
 		t.Fatal("usage must say plan is a dry-run")
 	}
+	if !strings.Contains(text, "deploy-timeout") || !strings.Contains(text, "skip-deploy") {
+		t.Fatal("usage must document deploy-timeout and skip-deploy")
+	}
 	if strings.Contains(text, "PINBUMPER_") {
 		t.Fatal("usage must not mention PINBUMPER_* env vars")
 	}
-}
-
-func usageString() string {
-	return `apply is the default command and the only one that writes. plan is a dry-run.
-The container image CMD is apply (omit command: in a Portainer stack).
-PORTAINER_URL
-PORTAINER_API_KEY_FILE
-PORTAINER_API_KEY`
 }
 
 func TestNoArgsIsApplyNotHelp(t *testing.T) {
