@@ -295,7 +295,7 @@ func decide(ctx context.Context, opt Options, src Source, svc compose.Service) D
 }
 
 func printDecision(opt Options, dec Decision) {
-	loc := dec.Source.Kind + "/" + dec.Source.Name
+	loc := dec.Source.Kind + ":" + dec.Source.Name
 	switch {
 	case dec.Err != nil:
 		fmt.Fprintf(opt.errw(), "ERROR  %s  %s  %v\n", loc, dec.Service.Name, dec.Err)

@@ -190,7 +190,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, dest 
 	if err != nil {
 		return fmt.Errorf("portainer %s %s: %w", method, redactPath(path), err)
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	payload, err := io.ReadAll(io.LimitReader(res.Body, 16<<20))
 	if err != nil {
 		return err

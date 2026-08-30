@@ -114,7 +114,7 @@ func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, er
 			return nil, fmt.Errorf("docker hub %s: %w", image.Path, err)
 		}
 		body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
-		res.Body.Close()
+		_ = res.Body.Close()
 		if err != nil {
 			return nil, err
 		}
@@ -150,7 +150,6 @@ func (c *Client) listDistribution(ctx context.Context, image ref.Ref) ([]string,
 		scheme = u.Scheme
 		host = u.Host
 	}
-	// Allow tests to point ghcr.io at httptest via RegistryOverride.
 	if o := c.registryURL(image.Registry); o != "" {
 		u, err := url.Parse(o)
 		if err != nil {
@@ -160,47 +159,84 @@ func (c *Client) listDistribution(ctx context.Context, image ref.Ref) ([]string,
 		host = u.Host
 	}
 	endpoint := fmt.Sprintf("%s://%s/v2/%s/tags/list?n=1000", scheme, host, image.Path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.decorate(req)
-	c.maybeBearer(req, image)
-	res, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("registry %s: %w", image.CacheKey(), err)
-	}
-	if res.StatusCode == http.StatusUnauthorized {
-		chal := res.Header.Get("WWW-Authenticate")
-		res.Body.Close()
-		token, terr := c.fetchToken(ctx, chal, image)
-		if terr != nil {
-			return nil, fmt.Errorf("registry auth %s: %w", image.CacheKey(), terr)
+	var (
+		tags  []string
+		token string
+		pages int
+	)
+	for endpoint != "" {
+		pages++
+		if pages > 50 {
+			return nil, fmt.Errorf("registry %s: too many tag pages", image.CacheKey())
 		}
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, err
 		}
 		c.decorate(req)
-		req.Header.Set("Authorization", "Bearer "+token)
-		res, err = c.HTTP.Do(req)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			c.maybeBearer(req, image)
+		}
+		res, err := c.HTTP.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("registry %s: %w", image.CacheKey(), err)
 		}
+		if res.StatusCode == http.StatusUnauthorized && token == "" {
+			chal := res.Header.Get("WWW-Authenticate")
+			_ = res.Body.Close()
+			token, err = c.fetchToken(ctx, chal, image)
+			if err != nil {
+				return nil, fmt.Errorf("registry auth %s: %w", image.CacheKey(), err)
+			}
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+		next := nextLink(res.Header.Get("Link"), endpoint)
+		_ = res.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if res.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("registry %s: %s", image.CacheKey(), res.Status)
+		}
+		var list tagsList
+		if err := json.Unmarshal(body, &list); err != nil {
+			return nil, fmt.Errorf("registry decode: %w", err)
+		}
+		tags = append(tags, list.Tags...)
+		endpoint = next
 	}
-	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
-	if err != nil {
-		return nil, err
+	return tags, nil
+}
+
+func nextLink(linkHeader, current string) string {
+	if linkHeader == "" {
+		return ""
 	}
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("registry %s: %s", image.CacheKey(), res.Status)
+	for _, part := range strings.Split(linkHeader, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.Contains(strings.ToLower(part), `rel="next"`) && !strings.Contains(strings.ToLower(part), `rel=next`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start < 0 || end <= start {
+			return ""
+		}
+		ref := part[start+1 : end]
+		u, err := url.Parse(ref)
+		if err != nil {
+			return ""
+		}
+		base, err := url.Parse(current)
+		if err != nil {
+			return ref
+		}
+		return base.ResolveReference(u).String()
 	}
-	var list tagsList
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, fmt.Errorf("registry decode: %w", err)
-	}
-	return list.Tags, nil
+	return ""
 }
 
 func (c *Client) registryURL(host string) string {
@@ -270,7 +306,7 @@ func (c *Client) fetchToken(ctx context.Context, wwwAuth string, image ref.Ref) 
 	if err != nil {
 		return "", err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
 		return "", err

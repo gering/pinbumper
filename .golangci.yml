@@ -10,5 +10,12 @@ linters:
     - unused
     - gofmt
 
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+
 issues:
   exclude-use-default: false

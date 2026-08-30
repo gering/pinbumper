@@ -73,6 +73,32 @@ func TestGHCRTagsList(t *testing.T) {
 	}
 }
 
+func TestDistributionLinkPagination(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("last") == "a" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"b"}})
+			return
+		}
+		w.Header().Set("Link", `</v2/org/app/tags/list?n=1000&last=a>; rel="next"`)
+		_ = json.NewEncoder(w).Encode(map[string]any{"tags": []string{"a"}})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.Client())
+	c.SetRegistryOverride("ghcr.io", ts.URL)
+	img, err := ref.Parse("ghcr.io/org/app:1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, err := c.ListTags(context.Background(), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 2 || tags[0] != "a" || tags[1] != "b" {
+		t.Fatalf("tags %v", tags)
+	}
+}
+
 func TestMapLister(t *testing.T) {
 	img, _ := ref.Parse("ghcr.io/paperless-ngx/paperless-ngx:3.1.0")
 	l := MapLister{Tags: map[string][]string{img.CacheKey(): {"3.1.1"}}}
