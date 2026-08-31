@@ -41,15 +41,18 @@ type Source struct {
 
 // Decision is one labeled service's plan.
 type Decision struct {
-	Source  Source
-	Service compose.Service
-	From    string
-	To      string
-	NewRef  string
-	Changed bool
-	Reason  string
-	Skipped bool // tag-list failure; logged, does not fail the run
-	Err     error
+	Source     Source
+	Service    compose.Service
+	From       string
+	To         string
+	FromDigest string
+	ToDigest   string
+	NewRef     string
+	Changed    bool
+	Follow     bool // digest-only bump; compose image tag is unchanged
+	Reason     string
+	Skipped    bool // tag-list / digest failure; logged, does not fail the run
+	Err        error
 }
 
 // Options configure a run.
@@ -59,6 +62,8 @@ type Options struct {
 	Portainer     *portainer.Client
 	StackFilter   []string
 	Tags          registry.Lister
+	Digests       registry.Digester
+	CurrentDigest func(ctx context.Context, src Source, svc compose.Service) (string, error)
 	Deploy        Deployer
 	SkipDeploy    bool
 	PullImage     bool
@@ -174,6 +179,10 @@ func Run(ctx context.Context, opt Options) error {
 		src := group[0].Source
 		text := documentText(docs, src)
 		for _, dec := range group {
+			if dec.Follow {
+				// Same compose image line; PullImage / compose pull applies the new digest.
+				continue
+			}
 			var err error
 			text, err = compose.RewriteImage(text, dec.Service, dec.To)
 			if err != nil {
@@ -280,6 +289,9 @@ func matchStack(filter []string, name string) bool {
 
 func decide(ctx context.Context, opt Options, src Source, svc compose.Service) Decision {
 	dec := Decision{Source: src, Service: svc, From: svc.Image.Tag}
+	if svc.Selector.FollowMode() {
+		return decideFollow(ctx, opt, src, svc, dec)
+	}
 	tags, err := opt.Tags.ListTags(ctx, svc.Image)
 	if err != nil {
 		// Same spirit as skip+log for a bad stack: one registry 401/403 must not
@@ -303,6 +315,116 @@ func decide(ctx context.Context, opt Options, src Source, svc compose.Service) D
 	return dec
 }
 
+func decideFollow(ctx context.Context, opt Options, src Source, svc compose.Service, dec Decision) Decision {
+	follow := svc.Selector.Follow
+	if svc.Image.Tag != follow {
+		dec.Skipped = true
+		dec.Reason = "image tag != follow"
+		dec.Err = fmt.Errorf("image tag %q != pinbumper.follow %q", svc.Image.Tag, follow)
+		return dec
+	}
+	d := digester(opt)
+	if d == nil {
+		dec.Skipped = true
+		dec.Reason = "manifest digest"
+		dec.Err = fmt.Errorf("digest lookup is required for pinbumper.follow")
+		return dec
+	}
+	remotes, err := d.ManifestDigests(ctx, svc.Image)
+	if err != nil {
+		dec.Skipped = true
+		dec.Reason = "manifest digest"
+		dec.Err = err
+		return dec
+	}
+	if len(remotes) == 0 {
+		dec.Skipped = true
+		dec.Reason = "manifest digest"
+		dec.Err = fmt.Errorf("no registry digest for %s", follow)
+		return dec
+	}
+	current := runningDigest(ctx, opt, src, svc)
+	dec.Follow = true
+	dec.To = follow
+	dec.FromDigest = current
+	dec.ToDigest = remotes[0]
+	dec.NewRef = svc.Image.WithTag(follow)
+	if registry.DigestMatches(current, remotes) {
+		dec.Changed = false
+		dec.Reason = "digest unchanged"
+		return dec
+	}
+	dec.Changed = true
+	return dec
+}
+
+func digester(opt Options) registry.Digester {
+	if opt.Digests != nil {
+		return opt.Digests
+	}
+	if d, ok := opt.Tags.(registry.Digester); ok {
+		return d
+	}
+	return nil
+}
+
+func runningDigest(ctx context.Context, opt Options, src Source, svc compose.Service) string {
+	if opt.CurrentDigest != nil {
+		d, err := opt.CurrentDigest(ctx, src, svc)
+		if err != nil {
+			return ""
+		}
+		return registry.NormalizeDigest(d)
+	}
+	switch src.Kind {
+	case "portainer":
+		return portainerRunningDigest(ctx, opt, src, svc)
+	case "local":
+		if insp, ok := opt.Deploy.(imageDigester); ok {
+			d, err := insp.ImageDigest(ctx, src.Path, svc.Name)
+			if err != nil {
+				return ""
+			}
+			return registry.NormalizeDigest(d)
+		}
+	}
+	return ""
+}
+
+type imageDigester interface {
+	ImageDigest(ctx context.Context, composeFile, service string) (string, error)
+}
+
+func portainerRunningDigest(ctx context.Context, opt Options, src Source, svc compose.Service) string {
+	if opt.Portainer == nil || !src.HasStack {
+		return ""
+	}
+	ctrs, err := opt.Portainer.ListContainers(ctx, src.Stack.EndpointID)
+	if err != nil {
+		return ""
+	}
+	match := portainer.SelectContainer(ctrs, src.Stack.Name, svc.Name, svc.Image.Tag, 0)
+	if match == nil {
+		for i := range ctrs {
+			if portainer.MatchesStack(ctrs[i], src.Stack.Name, svc.Name) {
+				match = &ctrs[i]
+				break
+			}
+		}
+	}
+	if match == nil {
+		return ""
+	}
+	ins, err := opt.Portainer.InspectContainer(ctx, src.Stack.EndpointID, match.ID)
+	if err != nil {
+		return ""
+	}
+	if d := portainer.FirstRepoDigest(ins.RepoDigests); d != "" {
+		return d
+	}
+	return ""
+}
+
 func printDecision(opt Options, dec Decision) {
 	loc := dec.Source.Kind + ":" + dec.Source.Name
 	switch {
@@ -310,6 +432,8 @@ func printDecision(opt Options, dec Decision) {
 		fmt.Fprintf(opt.errw(), "skip %s/%s: %v\n", loc, dec.Service.Name, dec.Err)
 	case dec.Err != nil:
 		fmt.Fprintf(opt.errw(), "ERROR  %s  %s  %v\n", loc, dec.Service.Name, dec.Err)
+	case dec.Follow && dec.Changed:
+		fmt.Fprintf(opt.out(), "FOLLOW %s  %s  %s\n", loc, dec.Service.Name, followLine(dec))
 	case dec.Changed:
 		fmt.Fprintf(opt.out(), "BUMP   %s  %s  %s -> %s\n", loc, dec.Service.Name, dec.From, dec.To)
 	default:
@@ -319,6 +443,15 @@ func printDecision(opt Options, dec Decision) {
 		}
 		fmt.Fprintf(opt.out(), "NOOP   %s  %s  %s (%s)\n", loc, dec.Service.Name, dec.From, reason)
 	}
+}
+
+func followLine(dec Decision) string {
+	// FOLLOW tag@sha256:abc… -> sha256:def…
+	from := dec.FromDigest
+	if from == "" {
+		return fmt.Sprintf("%s -> %s", dec.From, dec.ToDigest)
+	}
+	return fmt.Sprintf("%s@%s -> %s", dec.From, from, dec.ToDigest)
 }
 
 func documentText(docs []loaded, src Source) string {

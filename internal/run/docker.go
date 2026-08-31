@@ -52,6 +52,66 @@ func (d DockerDeployer) Up(ctx context.Context, composeFile string, services []s
 	return nil
 }
 
+// ImageDigest returns the running container's RepoDigest via docker inspect.
+func (d DockerDeployer) ImageDigest(ctx context.Context, composeFile, service string) (string, error) {
+	out, err := d.compose(ctx, composeFile, "ps", "-q", "-a", service)
+	if err != nil {
+		return "", fmt.Errorf("compose ps: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", nil
+	}
+	if i := strings.IndexByte(id, '\n'); i >= 0 {
+		id = strings.TrimSpace(id[:i])
+	}
+	raw, err := d.inspect(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	var ins struct {
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := json.Unmarshal(raw, &ins); err != nil {
+		return "", fmt.Errorf("docker inspect json: %w", err)
+	}
+	for _, dgst := range ins.RepoDigests {
+		if i := strings.Index(dgst, "@"); i >= 0 {
+			dgst = strings.TrimSpace(dgst[i+1:])
+		}
+		if dgst != "" {
+			return dgst, nil
+		}
+	}
+	return "", nil
+}
+
+func (d DockerDeployer) inspect(ctx context.Context, containerID string) ([]byte, error) {
+	look := d.LookPath
+	if look == nil {
+		look = exec.LookPath
+	}
+	run := d.RunCmd
+	if run == nil {
+		run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			cmd := exec.CommandContext(ctx, name, args...)
+			var buf bytes.Buffer
+			cmd.Stdout = &buf
+			cmd.Stderr = &buf
+			err := cmd.Run()
+			return buf.Bytes(), err
+		}
+	}
+	if _, err := look("docker"); err != nil {
+		return nil, fmt.Errorf("docker not found on PATH")
+	}
+	out, err := run(ctx, "docker", "inspect", "--format", "{{json .}}", containerID)
+	if err != nil {
+		return nil, fmt.Errorf("docker inspect: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return bytes.TrimSpace(out), nil
+}
+
 func (d DockerDeployer) Health(ctx context.Context, composeFile, service, wantTag string) (Health, error) {
 	out, err := d.compose(ctx, composeFile, "ps", "-a", "--format", "json", service)
 	if err != nil {

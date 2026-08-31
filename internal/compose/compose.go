@@ -14,6 +14,7 @@ const (
 	LabelRange   = "pinbumper.range"
 	LabelInclude = "pinbumper.include"
 	LabelExclude = "pinbumper.exclude"
+	LabelFollow  = "pinbumper.follow"
 )
 
 // Service is a Compose service that carries at least one pinbumper label.
@@ -65,10 +66,16 @@ func parseService(name string, body *yaml.Node) (Service, bool, error) {
 	rangeSpec := labels[LabelRange]
 	include := labels[LabelInclude]
 	exclude := labels[LabelExclude]
-	if rangeSpec == "" && include == "" && exclude == "" {
+	follow := strings.TrimSpace(labels[LabelFollow])
+	if rangeSpec == "" && include == "" && exclude == "" && follow == "" {
 		return Service{}, false, nil
 	}
-	sel, err := pin.New(rangeSpec, include, exclude)
+	sel, err := pin.FromLabels(pin.Labels{
+		Range:   rangeSpec,
+		Include: include,
+		Exclude: exclude,
+		Follow:  follow,
+	})
 	if err != nil {
 		return Service{}, false, fmt.Errorf("service %s: %w", name, err)
 	}

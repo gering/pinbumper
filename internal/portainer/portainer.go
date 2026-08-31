@@ -72,9 +72,11 @@ type Container struct {
 	Status  string            `json:"Status"`
 }
 
-// InspectState is the subset of docker inspect we need for health.
+// InspectState is the subset of docker inspect we need for health and follow.
 type InspectState struct {
-	State struct {
+	ID          string   `json:"Id"`
+	RepoDigests []string `json:"RepoDigests"`
+	State       struct {
 		Status   string `json:"Status"`
 		Running  bool   `json:"Running"`
 		ExitCode int    `json:"ExitCode"`
@@ -82,6 +84,23 @@ type InspectState struct {
 			Status string `json:"Status"`
 		} `json:"Health"`
 	} `json:"State"`
+}
+
+// FirstRepoDigest returns the first sha256 digest from RepoDigests (name@sha256:…).
+func FirstRepoDigest(digests []string) string {
+	for _, d := range digests {
+		if i := strings.Index(d, "@"); i >= 0 {
+			d = strings.TrimSpace(d[i+1:])
+		}
+		d = strings.TrimSpace(d)
+		if d != "" {
+			if !strings.Contains(d, ":") {
+				d = "sha256:" + d
+			}
+			return d
+		}
+	}
+	return ""
 }
 
 // Client calls Portainer CE. The API key is never logged.

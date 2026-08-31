@@ -60,11 +60,13 @@ func runMain(args []string) int {
 	}
 
 	registryClient := &http.Client{Timeout: *httpTimeout}
+	reg := registry.NewClient(registryClient)
 	opt := run.Options{
 		Mode:          mode,
 		ComposeFiles:  composeFiles,
 		StackFilter:   stacks,
-		Tags:          registry.NewClient(registryClient),
+		Tags:          reg,
+		Digests:       reg,
 		SkipDeploy:    *skipDeploy,
 		PullImage:     true,
 		HealthTimeout: *healthTimeout,
@@ -74,8 +76,8 @@ func runMain(args []string) int {
 	if !*skipDeploy {
 		opt.Deploy = run.DockerDeployer{}
 	}
-	if rc, ok := opt.Tags.(*registry.Client); ok && os.Getenv("GITHUB_TOKEN") != "" {
-		rc.GitHubToken = secret.String(os.Getenv("GITHUB_TOKEN"))
+	if os.Getenv("GITHUB_TOKEN") != "" {
+		reg.GitHubToken = secret.String(os.Getenv("GITHUB_TOKEN"))
 	}
 
 	if strings.TrimSpace(*portainerURL) != "" {
@@ -208,6 +210,6 @@ Environment:
   PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
   GITHUB_TOKEN                Optional, for GHCR rate limits (never logged)
 
-Unlabeled services are never touched. See README for pinbumper.range / include.
+Unlabeled services are never touched. See README for pinbumper.range / include / follow.
 `)
 }

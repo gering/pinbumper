@@ -219,6 +219,18 @@ func TestSelectContainerSkipsStale(t *testing.T) {
 	}
 }
 
+func TestFirstRepoDigest(t *testing.T) {
+	if got := FirstRepoDigest([]string{"vaultwarden/server@sha256:abc"}); got != "sha256:abc" {
+		t.Fatalf("got %q", got)
+	}
+	if got := FirstRepoDigest([]string{"", "sha256:def"}); got != "sha256:def" {
+		t.Fatalf("got %q", got)
+	}
+	if FirstRepoDigest(nil) != "" {
+		t.Fatal("empty")
+	}
+}
+
 func TestAPIKeyNotInError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusForbidden)

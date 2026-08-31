@@ -231,6 +231,144 @@ func TestDockerHubFallsBackToRegistry(t *testing.T) {
 	}
 }
 
+func TestManifestDigestsHubTagAPI(t *testing.T) {
+	var sawUA []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawUA = append(sawUA, r.UserAgent())
+		if strings.TrimSpace(r.UserAgent()) == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.URL.Path != "/v2/repositories/vaultwarden/server/tags/latest" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":   "latest",
+			"digest": "sha256:indexdigest",
+			"images": []map[string]string{
+				{"digest": "sha256:amd64digest"},
+				{"digest": "sha256:arm64digest"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.Client())
+	c.HubBase = ts.URL
+	c.SetRegistryOverride(dockerHubRegistry, "http://127.0.0.1:1")
+	img, err := ref.Parse("vaultwarden/server:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.ManifestDigests(context.Background(), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != "sha256:indexdigest" {
+		t.Fatalf("digests %v", got)
+	}
+	for _, ua := range sawUA {
+		if strings.TrimSpace(ua) == "" {
+			t.Fatal("User-Agent must not be empty")
+		}
+	}
+}
+
+func TestManifestDigestsHub403FallsBackToOCI(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer hub.Close()
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.UserAgent()) == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.URL.Path != "/v2/library/nginx/manifests/latest" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", "sha256:fromoci")
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		_, _ = w.Write([]byte(`{"schemaVersion":2}`))
+	}))
+	defer reg.Close()
+
+	c := NewClient(hub.Client())
+	c.HubBase = hub.URL
+	c.SetRegistryOverride(dockerHubRegistry, reg.URL)
+	img, err := ref.Parse("nginx:latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.ManifestDigests(context.Background(), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "sha256:fromoci" {
+		t.Fatalf("digests %v", got)
+	}
+}
+
+func TestManifestDigestsGHCR(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/org/app/manifests/main" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", "sha256:ghcrdigest")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mediaType": "application/vnd.oci.image.index.v1+json",
+			"manifests": []map[string]string{
+				{"digest": "sha256:platform"},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.Client())
+	c.SetRegistryOverride("ghcr.io", ts.URL)
+	img, err := ref.Parse("ghcr.io/org/app:main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.ManifestDigests(context.Background(), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "sha256:ghcrdigest" || got[1] != "sha256:platform" {
+		t.Fatalf("digests %v", got)
+	}
+}
+
+func TestNormalizeAndMatchDigest(t *testing.T) {
+	if NormalizeDigest("vaultwarden/server@sha256:abc") != "sha256:abc" {
+		t.Fatal("RepoDigest form")
+	}
+	if NormalizeDigest("abc") != "sha256:abc" {
+		t.Fatal("bare hex")
+	}
+	if !DigestMatches("sha256:abc", []string{"sha256:def", "sha256:abc"}) {
+		t.Fatal("should match one of remotes")
+	}
+	if DigestMatches("sha256:old", []string{"sha256:new"}) {
+		t.Fatal("mismatch")
+	}
+	if DigestMatches("", []string{"sha256:new"}) {
+		t.Fatal("empty current is not a match")
+	}
+}
+
+func TestMapDigester(t *testing.T) {
+	img, _ := ref.Parse("vaultwarden/server:latest")
+	d := MapDigester{Digest: map[string]string{DigestKey(img): "sha256:aaa"}}
+	got, err := d.ManifestDigests(context.Background(), img)
+	if err != nil || len(got) != 1 || got[0] != "sha256:aaa" {
+		t.Fatalf("%v %v", got, err)
+	}
+}
+
 func TestDockerHubFallbackErrorIncludesCatalogAndOCI(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)

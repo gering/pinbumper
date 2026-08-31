@@ -11,6 +11,10 @@
 // When range is set, the newest allowed tag is the highest semver.
 // When only include/exclude is set, tags are compared with a version-aware
 // sort (digit runs compared numerically, like GNU sort -V). The highest wins.
+//
+// pinbumper.follow is a third mode (Watchtower-style): watch the digest of the
+// current image tag. It is ignored when range or include is also set. Follow
+// never semver-sorts tags such as latest.
 package pin
 
 import (
@@ -32,15 +36,34 @@ type Selector struct {
 	Range   string
 	Include string
 	Exclude string
+	Follow  string
 
 	constraint *semver.Constraints
 	includeRE  *regexp.Regexp
 	excludeRE  *regexp.Regexp
 }
 
+// Labels is the raw pinbumper.* values from a Compose service.
+type Labels struct {
+	Range   string
+	Include string
+	Exclude string
+	Follow  string
+}
+
 // New compiles range and regex labels. Empty fields are omitted.
 func New(rangeSpec, include, exclude string) (Selector, error) {
-	s := Selector{Range: strings.TrimSpace(rangeSpec), Include: include, Exclude: exclude}
+	return FromLabels(Labels{Range: rangeSpec, Include: include, Exclude: exclude})
+}
+
+// FromLabels compiles every pinbumper label, including follow.
+func FromLabels(l Labels) (Selector, error) {
+	s := Selector{
+		Range:   strings.TrimSpace(l.Range),
+		Include: l.Include,
+		Exclude: l.Exclude,
+		Follow:  strings.TrimSpace(l.Follow),
+	}
 	if s.Range != "" {
 		c, err := semver.NewConstraint(s.Range)
 		if err != nil {
@@ -48,32 +71,40 @@ func New(rangeSpec, include, exclude string) (Selector, error) {
 		}
 		s.constraint = c
 	}
-	if include != "" {
-		re, err := regexp.Compile(include)
+	if l.Include != "" {
+		re, err := regexp.Compile(l.Include)
 		if err != nil {
-			return Selector{}, fmt.Errorf("pinbumper.include %q: %w", include, err)
+			return Selector{}, fmt.Errorf("pinbumper.include %q: %w", l.Include, err)
 		}
 		s.includeRE = re
 	}
-	if exclude != "" {
-		re, err := regexp.Compile(exclude)
+	if l.Exclude != "" {
+		re, err := regexp.Compile(l.Exclude)
 		if err != nil {
-			return Selector{}, fmt.Errorf("pinbumper.exclude %q: %w", exclude, err)
+			return Selector{}, fmt.Errorf("pinbumper.exclude %q: %w", l.Exclude, err)
 		}
 		s.excludeRE = re
 	}
-	if s.Range == "" && include == "" {
-		if exclude != "" {
+	if s.Range == "" && l.Include == "" {
+		if l.Exclude != "" {
 			return Selector{}, fmt.Errorf("pinbumper.exclude requires pinbumper.range or pinbumper.include")
 		}
-		return Selector{}, fmt.Errorf("no pinbumper.range or pinbumper.include")
+		if s.Follow == "" {
+			return Selector{}, fmt.Errorf("no pinbumper.range, pinbumper.include, or pinbumper.follow")
+		}
 	}
 	return s, nil
 }
 
 // Active reports whether any pinbumper label is set.
 func (s Selector) Active() bool {
-	return s.Range != "" || s.Include != "" || s.Exclude != ""
+	return s.Range != "" || s.Include != "" || s.Exclude != "" || s.Follow != ""
+}
+
+// FollowMode is true when follow is set and range/include are not. Range or
+// include always wins; follow is then ignored (digest-of-current-tag only).
+func (s Selector) FollowMode() bool {
+	return s.Follow != "" && s.Range == "" && s.Include == ""
 }
 
 // SemverMode is true when a range is present (npm rules; ignore non-semver tags).

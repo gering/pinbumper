@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gering/pinbumper/internal/compose"
 	"github.com/gering/pinbumper/internal/portainer"
 	"github.com/gering/pinbumper/internal/registry"
 	"github.com/gering/pinbumper/internal/secret"
@@ -470,5 +471,234 @@ func TestHealthUnhealthyNoRollback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no rollback") {
 		t.Fatalf("error should mention no rollback: %v", err)
+	}
+}
+
+const vaultwardenFollowYAML = `
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    labels:
+      pinbumper.follow: "latest"
+  postgres:
+    image: postgres:15
+`
+
+func vaultwardenDigester(digest string) registry.MapDigester {
+	return registry.MapDigester{Digest: map[string]string{
+		"docker.io/vaultwarden/server:latest": digest,
+	}}
+}
+
+func followCurrent(digest string) func(context.Context, Source, compose.Service) (string, error) {
+	return func(context.Context, Source, compose.Service) (string, error) {
+		return digest, nil
+	}
+}
+
+func vaultwardenPortainer(t *testing.T, yaml string, putBody *[]byte, puts *int) *portainer.Client {
+	t.Helper()
+	env := []portainer.EnvVar{{Name: "VW_ADMIN_TOKEN", Value: "s3cret-do-not-wipe"}}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "test-key" {
+			http.Error(w, "no", 401)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks":
+			_ = json.NewEncoder(w).Encode([]portainer.Stack{{
+				ID: 9, Name: "vaultwarden", Type: portainer.TypeCompose, EndpointID: 1, Env: env,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/9/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: yaml})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/stacks/9":
+			if puts != nil {
+				*puts++
+			}
+			if putBody != nil {
+				*putBody, _ = io.ReadAll(r.Body)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Id":9}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	client, err := portainer.New(ts.URL, secret.String("test-key"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+func TestFollowDigestChangedPlanAndApplyPUT(t *testing.T) {
+	var putBody []byte
+	puts := 0
+	client := vaultwardenPortainer(t, vaultwardenFollowYAML, &putBody, &puts)
+
+	opt := Options{
+		Portainer:     client,
+		Tags:          registry.MapLister{Tags: map[string][]string{}},
+		Digests:       vaultwardenDigester("sha256:newdigest"),
+		CurrentDigest: followCurrent("sha256:olddigest"),
+		PullImage:     true,
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	}
+
+	var planOut bytes.Buffer
+	opt.Mode = Plan
+	opt.Stdout = &planOut
+	if err := Run(context.Background(), opt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(planOut.String(), "FOLLOW") {
+		t.Fatalf("plan should want a digest pull:\n%s", planOut.String())
+	}
+	if !strings.Contains(planOut.String(), "latest@sha256:olddigest -> sha256:newdigest") {
+		t.Fatalf("plan FOLLOW line:\n%s", planOut.String())
+	}
+	if strings.Contains(planOut.String(), "postgres") {
+		t.Fatalf("unlabeled postgres mentioned:\n%s", planOut.String())
+	}
+	if puts != 0 {
+		t.Fatal("plan must not PUT")
+	}
+
+	var applyOut bytes.Buffer
+	opt.Mode = Apply
+	opt.Stdout = &applyOut
+	if err := Run(context.Background(), opt); err != nil {
+		t.Fatal(err)
+	}
+	if puts != 1 {
+		t.Fatalf("apply should PUT once, got %d", puts)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(putBody, &payload); err != nil {
+		t.Fatal(err)
+	}
+	file, _ := payload["StackFileContent"].(string)
+	if !strings.Contains(file, "vaultwarden/server:latest") {
+		t.Fatalf("image line must stay latest:\n%s", file)
+	}
+	if strings.Contains(file, "vaultwarden/server:sha256") || strings.Count(file, "latest") < 1 {
+		t.Fatalf("tag rewritten:\n%s", file)
+	}
+	if pull, _ := payload["PullImage"].(bool); !pull {
+		t.Fatalf("PullImage not true: %s", putBody)
+	}
+	if _, ok := payload["Env"]; !ok {
+		t.Fatalf("PUT omitted Env: %s", putBody)
+	}
+	envJSON, _ := json.Marshal(payload["Env"])
+	if !strings.Contains(string(envJSON), "VW_ADMIN_TOKEN") || !strings.Contains(string(envJSON), "s3cret-do-not-wipe") {
+		t.Fatalf("Env not preserved: %s", envJSON)
+	}
+}
+
+func TestFollowSameDigestNoopNoPUT(t *testing.T) {
+	var putBody []byte
+	puts := 0
+	client := vaultwardenPortainer(t, vaultwardenFollowYAML, &putBody, &puts)
+	var out bytes.Buffer
+	err := Run(context.Background(), Options{
+		Mode:          Apply,
+		Portainer:     client,
+		Tags:          registry.MapLister{Tags: map[string][]string{}},
+		Digests:       vaultwardenDigester("sha256:samedigest"),
+		CurrentDigest: followCurrent("sha256:samedigest"),
+		PullImage:     true,
+		Stdout:        &out,
+		Stderr:        io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if puts != 0 {
+		t.Fatalf("same digest must not PUT, got %d", puts)
+	}
+	if !strings.Contains(out.String(), "NOOP") {
+		t.Fatalf("want NOOP:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "FOLLOW") {
+		t.Fatalf("same digest must not FOLLOW:\n%s", out.String())
+	}
+}
+
+func TestRangeWinsOverFollow(t *testing.T) {
+	const y = `
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.0
+    labels:
+      pinbumper.range: "^3.1.0"
+      pinbumper.follow: "latest"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "docker-compose.yml")
+	if err := os.WriteFile(path, []byte(y), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	digestCalls := 0
+	err := Run(context.Background(), Options{
+		Mode:         Plan,
+		ComposeFiles: []string{path},
+		Tags:         paperlessLister(),
+		Digests: registry.MapDigester{
+			Err: fmt.Errorf("follow must be ignored when range is set"),
+		},
+		CurrentDigest: func(context.Context, Source, compose.Service) (string, error) {
+			digestCalls++
+			return "", fmt.Errorf("must not inspect for follow when range wins")
+		},
+		Stdout: &out,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "3.1.0 -> 3.1.1") {
+		t.Fatalf("range should bump:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "FOLLOW") {
+		t.Fatalf("follow should be ignored:\n%s", out.String())
+	}
+	if digestCalls != 0 {
+		t.Fatalf("current digest looked up %d times", digestCalls)
+	}
+}
+
+func TestFollowImageTagMismatchSkip(t *testing.T) {
+	const y = `
+services:
+  vaultwarden:
+    image: vaultwarden/server:1.32.0
+    labels:
+      pinbumper.follow: "latest"
+`
+	puts := 0
+	client := vaultwardenPortainer(t, y, nil, &puts)
+	var out, errb bytes.Buffer
+	err := Run(context.Background(), Options{
+		Mode:          Apply,
+		Portainer:     client,
+		Tags:          registry.MapLister{Tags: map[string][]string{}},
+		Digests:       vaultwardenDigester("sha256:whatever"),
+		CurrentDigest: followCurrent("sha256:old"),
+		PullImage:     true,
+		Stdout:        &out,
+		Stderr:        &errb,
+	})
+	if err != nil {
+		t.Fatalf("tag mismatch must skip, not crash: %v\n%s", err, errb.String())
+	}
+	if puts != 0 {
+		t.Fatalf("mismatch must not PUT, got %d", puts)
+	}
+	if !strings.Contains(errb.String(), "skip") || !strings.Contains(errb.String(), "follow") {
+		t.Fatalf("want skip+log:\n%s", errb.String())
 	}
 }

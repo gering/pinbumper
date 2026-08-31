@@ -78,6 +78,56 @@ services:
 	}
 }
 
+func TestParseFollowLabel(t *testing.T) {
+	const y = `
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    labels:
+      pinbumper.follow: "latest"
+  postgres:
+    image: postgres:15
+`
+	f, err := Parse(y)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Services) != 1 {
+		t.Fatalf("labeled services: %d, want 1", len(f.Services))
+	}
+	svc := f.Services[0]
+	if svc.Name != "vaultwarden" || svc.Image.Tag != "latest" {
+		t.Fatalf("got %+v", svc)
+	}
+	if !svc.Selector.FollowMode() || svc.Selector.Follow != "latest" {
+		t.Fatalf("follow: %+v", svc.Selector)
+	}
+}
+
+func TestParseRangeAndFollowKeepsRange(t *testing.T) {
+	const y = `
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.0
+    labels:
+      pinbumper.range: "^3.1.0"
+      pinbumper.follow: "latest"
+`
+	f, err := Parse(y)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Services) != 1 {
+		t.Fatal("want paperless")
+	}
+	if f.Services[0].Selector.FollowMode() {
+		t.Fatal("range must win over follow")
+	}
+	if f.Services[0].Selector.Range != "^3.1.0" {
+		t.Fatalf("range %s", f.Services[0].Selector.Range)
+	}
+}
+
 func TestUnlabeledNeverReturned(t *testing.T) {
 	const y = `
 services:

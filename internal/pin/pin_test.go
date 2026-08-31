@@ -189,6 +189,49 @@ func TestTwoPartTagsMatchRangeAsPatchZero(t *testing.T) {
 	}
 }
 
+func TestFollowOnlyValidAndFollowMode(t *testing.T) {
+	sel, err := FromLabels(Labels{Follow: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sel.FollowMode() || sel.Follow != "latest" {
+		t.Fatalf("follow-only must be FollowMode, got %+v", sel)
+	}
+	if !sel.Active() {
+		t.Fatal("follow-only must be active")
+	}
+}
+
+func TestRangeWinsFollowIgnored(t *testing.T) {
+	sel, err := FromLabels(Labels{Range: "^3.1.0", Follow: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.FollowMode() {
+		t.Fatal("range + follow must not be FollowMode (range wins)")
+	}
+	if sel.Follow != "latest" {
+		t.Fatalf("follow should still be stored, got %q", sel.Follow)
+	}
+	if sel.Allows("latest") {
+		t.Fatal("range must still reject latest; follow must not semver-sort it")
+	}
+	got, changed := sel.Choose("3.1.0", []string{"latest", "3.1.1", "main"})
+	if !changed || got != "3.1.1" {
+		t.Fatalf("range must pick 3.1.1, got %q changed=%v", got, changed)
+	}
+}
+
+func TestIncludeWinsFollowIgnored(t *testing.T) {
+	sel, err := FromLabels(Labels{Include: `^v2026\.\d+$`, Follow: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sel.FollowMode() {
+		t.Fatal("include + follow must not be FollowMode")
+	}
+}
+
 func TestExcludeOnlyRejected(t *testing.T) {
 	_, err := New("", "", ".*-rc.*")
 	if err == nil || !strings.Contains(err.Error(), "exclude requires") {
