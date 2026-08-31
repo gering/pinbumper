@@ -193,9 +193,38 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if strings.Contains(text, "--interval") {
 		t.Fatal("weekly example must not use --interval daemon")
 	}
+	if serviceBlock(text, "ofelia") != "" {
+		t.Fatal("weekly example must be apply-only (no Ofelia sidecar; use docker-compose.ofelia.yml)")
+	}
+	if !strings.Contains(text, "docker-compose.ofelia.yml") {
+		t.Fatal("weekly example must point at the dedicated Ofelia stack")
+	}
+	if !strings.Contains(text, "two Portainer stacks") && !strings.Contains(text, "dedicated Ofelia") {
+		t.Fatal("weekly example must say Ofelia is a separate / dedicated stack")
+	}
+	if !strings.Contains(text, "Cloudflare") {
+		t.Fatal("weekly example must warn against Cloudflare in front of Portainer")
+	}
+	if !strings.Contains(text, "first start is an apply") {
+		t.Fatal("weekly example must say stack deploy starts pinbumper once (an apply)")
+	}
+	if !strings.Contains(text, "docker start") || !strings.Contains(text, "not a pull") {
+		t.Fatal("weekly example must say Ofelia job-run is docker start, not a pull")
+	}
+}
+
+func TestOfeliaExampleIsDedicatedStack(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "examples", "docker-compose.ofelia.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if serviceBlock(text, "pinbumper") != "" {
+		t.Fatal("ofelia example must not nest the pinbumper service")
+	}
 	ofelia := serviceBlock(text, "ofelia")
 	if ofelia == "" {
-		t.Fatal("weekly example must include an Ofelia sidecar")
+		t.Fatal("ofelia example must define an ofelia service")
 	}
 	if !strings.Contains(ofelia, "image: mcuadros/ofelia:0.3.22") {
 		t.Fatal("ofelia must pin mcuadros/ofelia:0.3.22")
@@ -206,20 +235,67 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if !strings.Contains(ofelia, "/var/run/docker.sock:/var/run/docker.sock") {
 		t.Fatal("ofelia must mount docker.sock")
 	}
-	if !strings.Contains(ofelia, "ofelia.job-run.pinbumper.schedule: \"0 15 3 * * 1\"") {
+	if !strings.Contains(ofelia, `ofelia.job-run.pinbumper.schedule: "0 15 3 * * 1"`) {
 		t.Fatal("ofelia job-run must be weekly Monday 03:15 (0 15 3 * * 1)")
 	}
 	if !strings.Contains(ofelia, "ofelia.job-run.pinbumper.container: pinbumper") {
-		t.Fatal("ofelia job-run must start the pinbumper service")
+		t.Fatal("ofelia job-run must start the pinbumper container")
 	}
-	if !strings.Contains(text, "Cloudflare") {
-		t.Fatal("weekly example must warn against Cloudflare in front of Portainer")
+	if strings.Contains(text, "PINBUMPER_") {
+		t.Fatal("ofelia example must not mention PINBUMPER_* env vars")
 	}
-	if !strings.Contains(text, "first start is an apply") {
-		t.Fatal("weekly example must say stack deploy starts pinbumper once (an apply)")
+	if !strings.Contains(text, "one per Docker host") {
+		t.Fatal("ofelia example must say one Ofelia per Docker host")
 	}
-	if !strings.Contains(text, "docker start") || !strings.Contains(text, "not a pull") {
-		t.Fatal("weekly example must say Ofelia job-run is docker start, not a pull")
+	if !strings.Contains(text, "own compose") && !strings.Contains(text, "own") {
+		t.Fatal("ofelia example must say deploy as its own stack")
+	}
+	if !strings.Contains(text, "Two Ofelia") && !strings.Contains(text, "both schedule") {
+		t.Fatal("ofelia example must warn that two daemons duplicate jobs")
+	}
+	if !strings.Contains(text, "ofelia.service=true") {
+		t.Fatal("ofelia example must say job-run labels are only picked up from ofelia.service=true")
+	}
+	if !strings.Contains(text, "docker start") || !strings.Contains(text, "no pull") {
+		t.Fatal("ofelia example must say job-run is docker start, no pull")
+	}
+	if !strings.Contains(text, "UTC-unless-set") && !strings.Contains(text, "not UTC") {
+		t.Fatal("ofelia example must say cron is Ofelia TZ, not UTC-unless-set")
+	}
+}
+
+func TestREADMEOfeliaIsDedicatedStack(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if strings.Contains(text, "Ofelia sidecar, no") {
+		t.Fatal("README must not recommend nesting Ofelia as a pinbumper sidecar")
+	}
+	if !strings.Contains(text, "One Ofelia per Docker host") {
+		t.Fatal("README must say one Ofelia per Docker host")
+	}
+	if !strings.Contains(text, "no Ofelia sidecar") {
+		t.Fatal("README must say the pinbumper stack has no Ofelia sidecar")
+	}
+	if !strings.Contains(text, "docker-compose.ofelia.yml") {
+		t.Fatal("README must link the dedicated Ofelia example")
+	}
+	if !strings.Contains(text, "ofelia.service=true") {
+		t.Fatal("README must say job-run labels belong on the Ofelia service")
+	}
+	if !strings.Contains(text, "Two daemons") && !strings.Contains(text, "both schedule") {
+		t.Fatal("README must warn that two Ofelia daemons duplicate jobs")
+	}
+	if !strings.Contains(text, "ghcr.io/gering/pinbumper:0.1.0") {
+		t.Fatal("README must keep the GHCR image pin ghcr.io/gering/pinbumper:0.1.0")
+	}
+	if !strings.Contains(text, "public") {
+		t.Fatal("README must say the GHCR package must be public for unauthenticated pull")
+	}
+	if !strings.Contains(text, "UTC-unless-set") {
+		t.Fatal("README must say cron is Ofelia TZ, not UTC-unless-set")
 	}
 }
 
