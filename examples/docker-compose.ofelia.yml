@@ -1,0 +1,36 @@
+# Dedicated Ofelia scheduler — one per Docker host.
+#
+# Deploy this as its own compose / Portainer stack. Do not nest Ofelia
+# inside pinbumper, Uptime Kuma, or any other app stack.
+#
+# ofelia daemon --docker watches the host docker.sock and registers
+# every ofelia.job-* label it can see. Two Ofelia containers on the
+# same host both schedule the same jobs (a leftover kuma Ofelia plus
+# a pinbumper sidecar both ran the README date / @every 60s example
+# as my-test-job).
+#
+# job-run / job-local labels are only picked up from containers with
+# ofelia.service=true (the Ofelia image sets this). Put job definitions
+# on this service — labels on the target app (restart-kuma on
+# uptime-kuma) are ignored.
+#
+# TZ=Europe/Berlin so 0 15 3 * * 1 is Monday 03:15 Berlin, not UTC.
+# Cron is Ofelia's local time, not UTC-unless-set.
+#
+# job-run is docker start of the existing pinbumper container (no pull).
+# Recreate pinbumper to pick up a new GHCR image. The first compose up
+# / stack deploy of pinbumper is still an apply.
+
+services:
+  ofelia:
+    image: mcuadros/ofelia:0.3.22
+    container_name: ofelia
+    environment:
+      TZ: Europe/Berlin
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    labels:
+      ofelia.job-run.pinbumper.schedule: "0 15 3 * * 1"
+      ofelia.job-run.pinbumper.container: pinbumper

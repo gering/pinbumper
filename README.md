@@ -129,7 +129,7 @@ A file path (`--api-key-file` or `PORTAINER_API_KEY_FILE`) wins over `PORTAINER_
 
 Image `CMD` is `apply`. Omit `command:` so a stack run applies.
 
-`docker compose up` or a Portainer stack deploy starts pinbumper once (`CMD` apply, `restart: "no"`). That first start **is** an apply. Ofelia in the weekly example is additional Monday runs, not a substitute for it. Ofelia `job-run` is `docker start` of the existing container, not a pull — recreate pinbumper after a new GHCR image if you want those layers.
+The pinbumper stack is apply-only: `CMD` apply, `restart: "no"`, **no Ofelia sidecar**. `docker compose up` or a Portainer stack deploy starts pinbumper once. That first start **is** an apply. Weekly runs belong in a **separate** Ofelia stack (see [Scheduling with Ofelia](#scheduling-with-ofelia)). Ofelia `job-run` is `docker start` of the existing container, not a pull — recreate pinbumper after a new GHCR image if you want those layers.
 
 **API key as stack Env:**
 
@@ -195,7 +195,27 @@ docker build -t pinbumper:local .
 docker run --rm -v "$PWD:/work:ro" pinbumper:local plan --compose-file /work/docker-compose.yml
 ```
 
-A weekly Portainer / Mars example (Ofelia sidecar, no `command:` on pinbumper) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Stack deploy starts pinbumper once (an apply); Ofelia adds the weekly runs. Do not commit API keys.
+A weekly Portainer / Mars example is **two** stacks: apply-only pinbumper in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml), dedicated Ofelia in [`examples/docker-compose.ofelia.yml`](examples/docker-compose.ofelia.yml). Stack deploy starts pinbumper once (an apply); Ofelia adds the weekly `job-run`. Do not commit API keys.
+
+## Scheduling with Ofelia
+
+**One Ofelia per Docker host.** Prefer a **separate** compose / Portainer stack for Ofelia. The pinbumper stack stays apply-only (`image` `CMD` apply, `restart: "no"`, no Ofelia sidecar). Do not put Ofelia inside pinbumper, Uptime Kuma, or any other app stack.
+
+`ofelia daemon --docker` watches the host `docker.sock` and registers every `ofelia.job-*` label it can see. Two daemons on the same host both schedule the same jobs — a leftover Kuma-stack Ofelia plus pinbumper's sidecar both ran the README `date` / `@every 60s` example as `my-test-job`. Hiding Ofelia inside an app stack makes that easy to miss.
+
+`job-run` / `job-local` labels are only picked up from containers with `ofelia.service=true` (the Ofelia image sets this). Labels on the target app (for example `restart-kuma` on `uptime-kuma`) are ignored. Job definitions belong on the Ofelia service itself:
+
+```yaml
+labels:
+  ofelia.job-run.pinbumper.schedule: "0 15 3 * * 1"
+  ofelia.job-run.pinbumper.container: pinbumper
+```
+
+Set `TZ` on Ofelia (for example `Europe/Berlin`). Cron is Ofelia's local time, not UTC-unless-set.
+
+`job-run` starts the existing pinbumper container (`docker start`). It does not pull. Recreate pinbumper to pick up a new GHCR image. The first `compose up` / stack deploy of pinbumper is still an apply.
+
+Pin Ofelia at `mcuadros/ofelia:0.3.22`. Examples: [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml) (pinbumper apply-only) and [`examples/docker-compose.ofelia.yml`](examples/docker-compose.ofelia.yml) (dedicated scheduler).
 
 ## CLI
 
