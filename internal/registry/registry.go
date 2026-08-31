@@ -21,11 +21,49 @@ type Lister interface {
 	ListTags(ctx context.Context, image ref.Ref) ([]string, error)
 }
 
+// Digester returns registry manifest digest(s) for an image tag.
+// The first value is the tag's content digest; further values are child
+// platform digests from a multi-arch index (so a running RepoDigest can match).
+type Digester interface {
+	ManifestDigests(ctx context.Context, image ref.Ref) ([]string, error)
+}
+
 // MapLister is an in-memory Lister for tests. Keys are registry/path.
 type MapLister struct {
 	Tags map[string][]string
 	Err  error
 	Errs map[string]error // per CacheKey; overrides Tags for that image
+}
+
+// MapDigester is an in-memory Digester for tests. Keys are registry/path:tag.
+type MapDigester struct {
+	Digest map[string]string   // primary digest
+	All    map[string][]string // optional extras (index + platforms)
+	Err    error
+	Errs   map[string]error
+}
+
+func DigestKey(image ref.Ref) string {
+	return image.CacheKey() + ":" + image.Tag
+}
+
+func (m MapDigester) ManifestDigests(_ context.Context, image ref.Ref) ([]string, error) {
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	key := DigestKey(image)
+	if err, ok := m.Errs[key]; ok {
+		return nil, err
+	}
+	if extras, ok := m.All[key]; ok && len(extras) > 0 {
+		return append([]string(nil), extras...), nil
+	}
+	if m.Digest != nil {
+		if d, ok := m.Digest[key]; ok && d != "" {
+			return []string{d}, nil
+		}
+	}
+	return nil, fmt.Errorf("no digest for %s", key)
 }
 
 func (m MapLister) ListTags(_ context.Context, image ref.Ref) ([]string, error) {
@@ -61,8 +99,9 @@ type Client struct {
 	UserAgent   string
 	overrides   map[string]string
 
-	mu    sync.Mutex
-	cache map[string][]string
+	mu          sync.Mutex
+	cache       map[string][]string
+	digestCache map[string][]string
 }
 
 func NewClient(httpClient *http.Client) *Client {
@@ -70,10 +109,11 @@ func NewClient(httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &Client{
-		HTTP:      httpClient,
-		HubBase:   "https://hub.docker.com",
-		UserAgent: DefaultUserAgent,
-		cache:     map[string][]string{},
+		HTTP:        httpClient,
+		HubBase:     "https://hub.docker.com",
+		UserAgent:   DefaultUserAgent,
+		cache:       map[string][]string{},
+		digestCache: map[string][]string{},
 	}
 }
 
@@ -102,6 +142,43 @@ func (c *Client) ListTags(ctx context.Context, image ref.Ref) ([]string, error) 
 	c.cache[key] = tags
 	c.mu.Unlock()
 	return append([]string(nil), tags...), nil
+}
+
+// ManifestDigests returns the registry digest for image.Tag plus any child
+// platform digests from a multi-arch index. Docker Hub uses the Hub tag API
+// first, then the same OCI fallback (and User-Agent) as ListTags.
+func (c *Client) ManifestDigests(ctx context.Context, image ref.Ref) ([]string, error) {
+	key := DigestKey(image)
+	c.mu.Lock()
+	if d, ok := c.digestCache[key]; ok {
+		c.mu.Unlock()
+		return append([]string(nil), d...), nil
+	}
+	c.mu.Unlock()
+
+	var (
+		digests []string
+		err     error
+	)
+	if image.IsDockerHub() {
+		digests, err = c.hubDigests(ctx, image)
+	} else {
+		digests, err = c.distributionDigests(ctx, image)
+	}
+	if err != nil {
+		return nil, err
+	}
+	digests = uniqueDigests(digests)
+	if len(digests) == 0 {
+		return nil, fmt.Errorf("registry %s: no digest for tag %s", image.CacheKey(), image.Tag)
+	}
+	c.mu.Lock()
+	if c.digestCache == nil {
+		c.digestCache = map[string][]string{}
+	}
+	c.digestCache[key] = digests
+	c.mu.Unlock()
+	return append([]string(nil), digests...), nil
 }
 
 type hubPage struct {
@@ -428,4 +505,216 @@ func splitAuthParams(s string) []string {
 		parts = append(parts, strings.TrimSpace(b.String()))
 	}
 	return parts
+}
+
+var manifestAccept = strings.Join([]string{
+	"application/vnd.oci.image.index.v1+json",
+	"application/vnd.docker.distribution.manifest.list.v2+json",
+	"application/vnd.oci.image.manifest.v1+json",
+	"application/vnd.docker.distribution.manifest.v2+json",
+}, ", ")
+
+type hubTagDetail struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+	Images []struct {
+		Digest string `json:"digest"`
+	} `json:"images"`
+}
+
+type ociIndex struct {
+	MediaType string `json:"mediaType"`
+	Manifests []struct {
+		Digest string `json:"digest"`
+	} `json:"manifests"`
+}
+
+func (c *Client) hubDigests(ctx context.Context, image ref.Ref) ([]string, error) {
+	digests, _, err := c.hubTagDigests(ctx, image)
+	if err == nil && len(digests) > 0 {
+		return digests, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("docker hub %s:%s: empty digest", image.Path, image.Tag)
+	}
+	fallback, ferr := c.hubRegistryDigests(ctx, image)
+	if ferr == nil {
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("%w; oci fallback: %v", err, ferr)
+}
+
+func (c *Client) hubTagDigests(ctx context.Context, image ref.Ref) ([]string, int, error) {
+	base := strings.TrimRight(c.HubBase, "/")
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags/%s", base, image.Path, url.PathEscape(image.Tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	c.decorate(req)
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("docker hub %s:%s: %w", image.Path, image.Tag, err)
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	_ = res.Body.Close()
+	if err != nil {
+		return nil, 0, err
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, res.StatusCode, fmt.Errorf("docker hub %s:%s: %s", image.Path, image.Tag, res.Status)
+	}
+	var detail hubTagDetail
+	if err := json.Unmarshal(body, &detail); err != nil {
+		return nil, 0, fmt.Errorf("docker hub tag decode: %w", err)
+	}
+	var out []string
+	if d := NormalizeDigest(detail.Digest); d != "" {
+		out = append(out, d)
+	}
+	for _, img := range detail.Images {
+		if d := NormalizeDigest(img.Digest); d != "" {
+			out = append(out, d)
+		}
+	}
+	return uniqueDigests(out), http.StatusOK, nil
+}
+
+func (c *Client) hubRegistryDigests(ctx context.Context, image ref.Ref) ([]string, error) {
+	clone := image
+	clone.Registry = dockerHubRegistry
+	return c.distributionDigests(ctx, clone)
+}
+
+func (c *Client) distributionDigests(ctx context.Context, image ref.Ref) ([]string, error) {
+	scheme, host, err := c.registryHost(image)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", scheme, host, image.Path, url.PathEscape(image.Tag))
+	var token string
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", c.userAgent())
+		req.Header.Set("Accept", manifestAccept)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			c.maybeBearer(req, image)
+		}
+		res, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("registry digest %s: %w", DigestKey(image), err)
+		}
+		if res.StatusCode == http.StatusUnauthorized && token == "" {
+			chal := res.Header.Get("WWW-Authenticate")
+			_ = res.Body.Close()
+			token, err = c.fetchToken(ctx, chal, image)
+			if err != nil {
+				return nil, fmt.Errorf("registry auth %s: %w", DigestKey(image), err)
+			}
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+		hdr := res.Header.Get("Docker-Content-Digest")
+		_ = res.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if res.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("registry digest %s: %s", DigestKey(image), res.Status)
+		}
+		var out []string
+		if d := NormalizeDigest(hdr); d != "" {
+			out = append(out, d)
+		}
+		var idx ociIndex
+		if json.Unmarshal(body, &idx) == nil {
+			for _, m := range idx.Manifests {
+				if d := NormalizeDigest(m.Digest); d != "" {
+					out = append(out, d)
+				}
+			}
+		}
+		out = uniqueDigests(out)
+		if len(out) == 0 {
+			return nil, fmt.Errorf("registry digest %s: missing Docker-Content-Digest", DigestKey(image))
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("registry digest %s: auth retry exhausted", DigestKey(image))
+}
+
+func (c *Client) registryHost(image ref.Ref) (scheme, host string, err error) {
+	scheme = "https"
+	host = image.Registry
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		u, err := url.Parse(host)
+		if err != nil {
+			return "", "", err
+		}
+		scheme = u.Scheme
+		host = u.Host
+	}
+	if o := c.registryURL(image.Registry); o != "" {
+		u, err := url.Parse(o)
+		if err != nil {
+			return "", "", err
+		}
+		scheme = u.Scheme
+		host = u.Host
+	}
+	return scheme, host, nil
+}
+
+// NormalizeDigest returns a sha256:… digest, stripping a name@ prefix.
+func NormalizeDigest(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "@"); i >= 0 {
+		s = strings.TrimSpace(s[i+1:])
+	}
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, ":") {
+		s = "sha256:" + s
+	}
+	return s
+}
+
+// DigestMatches reports whether current (RepoDigest / header digest) is among remotes.
+func DigestMatches(current string, remotes []string) bool {
+	cur := NormalizeDigest(current)
+	if cur == "" {
+		return false
+	}
+	for _, r := range remotes {
+		if NormalizeDigest(r) == cur {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueDigests(in []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, d := range in {
+		d = NormalizeDigest(d)
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
 }

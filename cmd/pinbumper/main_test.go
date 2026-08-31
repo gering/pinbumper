@@ -128,6 +128,9 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if strings.Contains(text, "PINBUMPER_") {
 		t.Fatal("usage must not mention PINBUMPER_* env vars")
 	}
+	if !strings.Contains(text, "follow") {
+		t.Fatal("usage must point at pinbumper.follow")
+	}
 }
 
 func TestNoArgsIsApplyNotHelp(t *testing.T) {

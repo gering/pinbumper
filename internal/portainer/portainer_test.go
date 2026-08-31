@@ -219,6 +219,48 @@ func TestSelectContainerSkipsStale(t *testing.T) {
 	}
 }
 
+func TestInspectImage(t *testing.T) {
+	var gotPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/images/sha256:imgid/json") {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ImageInspect{
+			ID:          "sha256:imgid",
+			RepoDigests: []string{"vaultwarden/server@sha256:fromimage"},
+		})
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.InspectImage(context.Background(), 1, "sha256:imgid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotPath, "/endpoints/1/docker/images/sha256:imgid/json") {
+		t.Fatalf("path %s", gotPath)
+	}
+	if FirstRepoDigest(got.RepoDigests) != "sha256:fromimage" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestFirstRepoDigest(t *testing.T) {
+	if got := FirstRepoDigest([]string{"vaultwarden/server@sha256:abc"}); got != "sha256:abc" {
+		t.Fatalf("got %q", got)
+	}
+	if got := FirstRepoDigest([]string{"", "sha256:def"}); got != "sha256:def" {
+		t.Fatalf("got %q", got)
+	}
+	if FirstRepoDigest(nil) != "" {
+		t.Fatal("empty")
+	}
+}
+
 func TestAPIKeyNotInError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusForbidden)
