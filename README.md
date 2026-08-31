@@ -129,6 +129,8 @@ A file path (`--api-key-file` or `PORTAINER_API_KEY_FILE`) wins over `PORTAINER_
 
 Image `CMD` is `apply`. Omit `command:` so a stack run applies.
 
+`docker compose up` or a Portainer stack deploy starts pinbumper once (`CMD` apply, `restart: "no"`). That first start **is** an apply. Ofelia in the weekly example is additional Monday runs, not a substitute for it. Ofelia `job-run` is `docker start` of the existing container, not a pull — recreate pinbumper after a new GHCR image if you want those layers.
+
 **API key as stack Env:**
 
 ```yaml
@@ -178,11 +180,13 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 go install github.com/gering/pinbumper/cmd/pinbumper@latest
 ```
 
-Or pull the published `linux/amd64` image (`:latest` is also pushed on `main`):
+Or pull the published `linux/amd64` image (`:latest` and `sha-*` on `main`; `:0.1.0` only when a `v0.1.0` git tag is pushed):
 
 ```bash
 docker pull ghcr.io/gering/pinbumper:0.1.0
 ```
+
+The first GHCR package is often **private**. An unauthenticated pull from Mars needs the package set **public** (or a pull token). Do not put a token in the stack example.
 
 Or build a local image:
 
@@ -191,7 +195,7 @@ docker build -t pinbumper:local .
 docker run --rm -v "$PWD:/work:ro" pinbumper:local plan --compose-file /work/docker-compose.yml
 ```
 
-A weekly Portainer / Mars example (Ofelia sidecar, no `command:` on pinbumper) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Images publish to `ghcr.io/gering/pinbumper` on `main` and `v*` tags. Do not commit API keys.
+A weekly Portainer / Mars example (Ofelia sidecar, no `command:` on pinbumper) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Stack deploy starts pinbumper once (an apply); Ofelia adds the weekly runs. Do not commit API keys.
 
 ## CLI
 

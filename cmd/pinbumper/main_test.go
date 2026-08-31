@@ -151,6 +151,9 @@ func TestDockerfileCMDIsApply(t *testing.T) {
 	if !strings.Contains(text, `CMD ["apply"]`) {
 		t.Fatal("Dockerfile CMD must be apply (not --help)")
 	}
+	if !strings.Contains(text, "ARG VERSION") || !strings.Contains(text, "-X main.version=${VERSION}") {
+		t.Fatal("Dockerfile must take VERSION as a build-arg for -X main.version")
+	}
 	if strings.Contains(text, `CMD ["--help"]`) {
 		t.Fatal("Dockerfile must not default to --help")
 	}
@@ -194,8 +197,11 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if ofelia == "" {
 		t.Fatal("weekly example must include an Ofelia sidecar")
 	}
-	if !strings.Contains(ofelia, "image: mcuadros/ofelia:latest") {
-		t.Fatal("ofelia must use mcuadros/ofelia:latest")
+	if !strings.Contains(ofelia, "image: mcuadros/ofelia:0.3.22") {
+		t.Fatal("ofelia must pin mcuadros/ofelia:0.3.22")
+	}
+	if !strings.Contains(ofelia, "TZ: Europe/Berlin") {
+		t.Fatal("ofelia must set TZ=Europe/Berlin so the cron is Berlin time")
 	}
 	if !strings.Contains(ofelia, "/var/run/docker.sock:/var/run/docker.sock") {
 		t.Fatal("ofelia must mount docker.sock")
@@ -208,6 +214,29 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	}
 	if !strings.Contains(text, "Cloudflare") {
 		t.Fatal("weekly example must warn against Cloudflare in front of Portainer")
+	}
+	if !strings.Contains(text, "first start is an apply") {
+		t.Fatal("weekly example must say stack deploy starts pinbumper once (an apply)")
+	}
+	if !strings.Contains(text, "docker start") || !strings.Contains(text, "not a pull") {
+		t.Fatal("weekly example must say Ofelia job-run is docker start, not a pull")
+	}
+}
+
+func TestGHCRWorkflowDoesNotRetagSemverOnMain(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "ghcr.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if strings.Contains(text, "git describe") {
+		t.Fatal("ghcr.yml must not retag semver from git describe on main")
+	}
+	if !strings.Contains(text, "type=semver,pattern={{version}}") {
+		t.Fatal("semver image tags must come from type=semver on v* git tags")
+	}
+	if !strings.Contains(text, "type=sha") || !strings.Contains(text, "value=latest,enable={{is_default_branch}}") {
+		t.Fatal("main must still tag latest and sha-*")
 	}
 }
 

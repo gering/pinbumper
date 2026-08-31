@@ -4,13 +4,20 @@
 # behind Cloudflare — proxied long PUTs can hang.
 #
 # The pinbumper image CMD is apply — do not set command: on pinbumper.
-# Pin :0.1.0 (optional: ghcr.io/gering/pinbumper:latest).
+# Pin :0.1.0 (immutable until the next v* git tag). Optional: :latest.
+#
+# docker compose up / a Portainer stack deploy starts pinbumper once
+# (CMD apply, restart: "no"). That first start is an apply. Ofelia is
+# additional weekly runs, not a substitute for it.
+#
+# Ofelia job-run is docker start of the existing pinbumper container,
+# not a pull. A new GHCR image is not picked up until you recreate
+# the pinbumper container (redeploy / compose up --force-recreate).
+#
+# Ofelia TZ=Europe/Berlin so 0 15 3 * * 1 is Monday 03:15 Berlin, not UTC.
 #
 # Set PORTAINER_API_KEY as a Portainer stack Environment variable
 # (${PORTAINER_API_KEY}). Do not commit the API key.
-#
-# Ofelia starts the pinbumper container weekly (Monday 03:15).
-# Ofelia uses a 6-field cron (seconds first): 0 15 3 * * 1
 #
 # File-based key (equal alternative): drop PORTAINER_API_KEY and instead set
 #   environment:
@@ -29,7 +36,9 @@ services:
     restart: "no"
 
   ofelia:
-    image: mcuadros/ofelia:latest
+    image: mcuadros/ofelia:0.3.22
+    environment:
+      TZ: Europe/Berlin
     depends_on:
       - pinbumper
     command: daemon --docker
