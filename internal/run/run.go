@@ -282,7 +282,7 @@ func decide(ctx context.Context, opt Options, src Source, svc compose.Service) D
 	dec := Decision{Source: src, Service: svc, From: svc.Image.Tag}
 	tags, err := opt.Tags.ListTags(ctx, svc.Image)
 	if err != nil {
-		// Same spirit as skip+log for a bad stack: one registry 403 must not
+		// Same spirit as skip+log for a bad stack: one registry 401/403 must not
 		// abort BUMP/NOOP for the other services.
 		dec.Err = err
 		dec.Skipped = true
