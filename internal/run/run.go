@@ -415,14 +415,26 @@ func portainerRunningDigest(ctx context.Context, opt Options, src Source, svc co
 	if match == nil {
 		return ""
 	}
-	ins, err := opt.Portainer.InspectContainer(ctx, src.Stack.EndpointID, match.ID)
+	imageID := strings.TrimSpace(match.ImageID)
+	if imageID == "" {
+		// Container inspect's Image is the image id. RepoDigests are not here.
+		ins, err := opt.Portainer.InspectContainer(ctx, src.Stack.EndpointID, match.ID)
+		if err != nil {
+			return ""
+		}
+		imageID = strings.TrimSpace(ins.Image)
+	}
+	if imageID == "" {
+		imageID = strings.TrimSpace(match.Image)
+	}
+	if imageID == "" {
+		return ""
+	}
+	img, err := opt.Portainer.InspectImage(ctx, src.Stack.EndpointID, imageID)
 	if err != nil {
 		return ""
 	}
-	if d := portainer.FirstRepoDigest(ins.RepoDigests); d != "" {
-		return d
-	}
-	return ""
+	return portainer.FirstRepoDigest(img.RepoDigests)
 }
 
 func printDecision(opt Options, dec Decision) {

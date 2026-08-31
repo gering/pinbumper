@@ -671,6 +671,100 @@ services:
 	}
 }
 
+func TestFollowUsesImageInspectRepoDigestsNotContainer(t *testing.T) {
+	// Container inspect JSON has empty RepoDigests (Docker reality). Image
+	// inspect has the matching digest. Reading the container field would
+	// treat current as "" and FOLLOW/PUT every apply.
+	const imageID = "sha256:imgid123"
+	const digest = "sha256:samedigest"
+	env := []portainer.EnvVar{{Name: "VW_ADMIN_TOKEN", Value: "s3cret-do-not-wipe"}}
+	var puts int
+	var imageInspects, containerInspects int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "test-key" {
+			http.Error(w, "no", 401)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks":
+			_ = json.NewEncoder(w).Encode([]portainer.Stack{{
+				ID: 9, Name: "vaultwarden", Type: portainer.TypeCompose, EndpointID: 1, Env: env,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/9/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: vaultwardenFollowYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/containers/json":
+			// Image name only — no ImageID. Force container inspect for the
+			// image id, then image inspect for RepoDigests.
+			_ = json.NewEncoder(w).Encode([]portainer.Container{{
+				ID:      "ctr1",
+				Image:   "vaultwarden/server:latest",
+				Created: 100,
+				State:   "running",
+				Labels: map[string]string{
+					"com.docker.compose.project": "vaultwarden",
+					"com.docker.compose.service": "vaultwarden",
+				},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/containers/ctr1/json":
+			containerInspects++
+			// Realistic container inspect: Image id set, RepoDigests absent/empty.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"Id":          "ctr1",
+				"Image":       imageID,
+				"RepoDigests": []string{},
+				"State":       map[string]any{"Status": "running", "Running": true},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/images/"+imageID+"/json":
+			imageInspects++
+			_ = json.NewEncoder(w).Encode(portainer.ImageInspect{
+				ID:          imageID,
+				RepoDigests: []string{"vaultwarden/server@" + digest},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/stacks/9":
+			puts++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Id":9}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	client, err := portainer.New(ts.URL, secret.String("test-key"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = Run(context.Background(), Options{
+		Mode:      Apply,
+		Portainer: client,
+		Tags:      registry.MapLister{Tags: map[string][]string{}},
+		Digests:   vaultwardenDigester(digest),
+		// No CurrentDigest — must go through Portainer inspect.
+		PullImage: true,
+		Stdout:    &out,
+		Stderr:    io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containerInspects == 0 {
+		t.Fatal("must inspect the container to learn the image id")
+	}
+	if imageInspects == 0 {
+		t.Fatal("must inspect the image (RepoDigests live there), not only the container")
+	}
+	if puts != 0 {
+		t.Fatalf("unchanged :latest must not PUT (container RepoDigests are empty); puts=%d inspects container=%d image=%d\n%s",
+			puts, containerInspects, imageInspects, out.String())
+	}
+	if !strings.Contains(out.String(), "NOOP") {
+		t.Fatalf("want NOOP from image RepoDigest, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "FOLLOW") {
+		t.Fatalf("empty container RepoDigests must not force FOLLOW:\n%s", out.String())
+	}
+}
+
 func TestFollowImageTagMismatchSkip(t *testing.T) {
 	const y = `
 services:

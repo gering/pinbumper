@@ -187,7 +187,7 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 2. **List tags** from Docker Hub (Hub catalog API, with a User-Agent; OCI `registry-1.docker.io` fallback on Hub 401/403, and also 429/5xx) or GHCR / other registries (OCI distribution + bearer challenge). For `pinbumper.follow`, look up the **manifest digest** for the current tag the same way (Hub tag API + OCI fallback). `GITHUB_TOKEN` is optional for GHCR rate limits. Tokens are never logged. If the OCI fallback also fails, the skip/log includes the catalog status and the fallback error.
 3. **Choose**
    - range/include: the newest tag allowed by the service’s labels. Same as current pin → noop. `latest` / `main` are never semver candidates.
-   - follow: compare the registry digest to the running RepoDigest (Portainer inspect, or local `docker inspect`). Different → digest-only bump. Same → noop. Image tag ≠ follow → skip and log.
+   - follow: compare the registry digest to the running **image** RepoDigest (Portainer image inspect, or local `docker image inspect` — not container inspect). Different → digest-only bump. Same → noop. Image tag ≠ follow → skip and log.
 4. **Rewrite** only the image tag in the original YAML (comments and key order stay). Follow does **not** rewrite the image line.
 5. **Deploy**
    - Local: `docker compose -f FILE up -d --pull always --no-deps <changed services>` (or `--skip-deploy` to only write the file).

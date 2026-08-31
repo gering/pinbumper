@@ -52,7 +52,8 @@ func (d DockerDeployer) Up(ctx context.Context, composeFile string, services []s
 	return nil
 }
 
-// ImageDigest returns the running container's RepoDigest via docker inspect.
+// ImageDigest returns the running image's RepoDigest via docker image inspect.
+// Container inspect does not populate RepoDigests; those live on the image.
 func (d DockerDeployer) ImageDigest(ctx context.Context, composeFile, service string) (string, error) {
 	out, err := d.compose(ctx, composeFile, "ps", "-q", "-a", service)
 	if err != nil {
@@ -65,17 +66,32 @@ func (d DockerDeployer) ImageDigest(ctx context.Context, composeFile, service st
 	if i := strings.IndexByte(id, '\n'); i >= 0 {
 		id = strings.TrimSpace(id[:i])
 	}
-	raw, err := d.inspect(ctx, id)
+	raw, err := d.docker(ctx, "inspect", "--format", "{{json .}}", id)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("docker inspect: %w: %s", err, strings.TrimSpace(string(raw)))
 	}
-	var ins struct {
-		RepoDigests []string `json:"RepoDigests"`
+	var ctr struct {
+		Image       string   `json:"Image"`
+		RepoDigests []string `json:"RepoDigests"` // empty on container inspect; do not use
 	}
-	if err := json.Unmarshal(raw, &ins); err != nil {
+	if err := json.Unmarshal(raw, &ctr); err != nil {
 		return "", fmt.Errorf("docker inspect json: %w", err)
 	}
-	for _, dgst := range ins.RepoDigests {
+	imageID := strings.TrimSpace(ctr.Image)
+	if imageID == "" {
+		return "", nil
+	}
+	raw, err = d.docker(ctx, "image", "inspect", "--format", "{{json .}}", imageID)
+	if err != nil {
+		return "", fmt.Errorf("docker image inspect: %w: %s", err, strings.TrimSpace(string(raw)))
+	}
+	var img struct {
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := json.Unmarshal(raw, &img); err != nil {
+		return "", fmt.Errorf("docker image inspect json: %w", err)
+	}
+	for _, dgst := range img.RepoDigests {
 		if i := strings.Index(dgst, "@"); i >= 0 {
 			dgst = strings.TrimSpace(dgst[i+1:])
 		}
@@ -86,7 +102,7 @@ func (d DockerDeployer) ImageDigest(ctx context.Context, composeFile, service st
 	return "", nil
 }
 
-func (d DockerDeployer) inspect(ctx context.Context, containerID string) ([]byte, error) {
+func (d DockerDeployer) docker(ctx context.Context, args ...string) ([]byte, error) {
 	look := d.LookPath
 	if look == nil {
 		look = exec.LookPath
@@ -105,11 +121,8 @@ func (d DockerDeployer) inspect(ctx context.Context, containerID string) ([]byte
 	if _, err := look("docker"); err != nil {
 		return nil, fmt.Errorf("docker not found on PATH")
 	}
-	out, err := run(ctx, "docker", "inspect", "--format", "{{json .}}", containerID)
-	if err != nil {
-		return nil, fmt.Errorf("docker inspect: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return bytes.TrimSpace(out), nil
+	out, err := run(ctx, "docker", args...)
+	return bytes.TrimSpace(out), err
 }
 
 func (d DockerDeployer) Health(ctx context.Context, composeFile, service, wantTag string) (Health, error) {
