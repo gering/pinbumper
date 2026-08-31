@@ -25,11 +25,15 @@ type Lister interface {
 type MapLister struct {
 	Tags map[string][]string
 	Err  error
+	Errs map[string]error // per CacheKey; overrides Tags for that image
 }
 
 func (m MapLister) ListTags(_ context.Context, image ref.Ref) ([]string, error) {
 	if m.Err != nil {
 		return nil, m.Err
+	}
+	if err, ok := m.Errs[image.CacheKey()]; ok {
+		return nil, err
 	}
 	if m.Tags == nil {
 		return nil, fmt.Errorf("no tags for %s", image.CacheKey())
@@ -40,6 +44,14 @@ func (m MapLister) ListTags(_ context.Context, image ref.Ref) ([]string, error) 
 	}
 	return append([]string(nil), tags...), nil
 }
+
+// DefaultUserAgent is sent on every Hub and registry request. Docker Hub /
+// Cloudflare 403s clients that omit User-Agent (Go's default is not enough
+// on some networks; an empty value is never sent).
+const DefaultUserAgent = "pinbumper/0.1.0 (+https://github.com/gering/pinbumper)"
+
+// dockerHubRegistry is the OCI distribution host for docker.io library images.
+const dockerHubRegistry = "registry-1.docker.io"
 
 // Client talks to Docker Hub's tag API and the OCI distribution spec.
 type Client struct {
@@ -60,7 +72,7 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{
 		HTTP:      httpClient,
 		HubBase:   "https://hub.docker.com",
-		UserAgent: "pinbumper/0.1.0",
+		UserAgent: DefaultUserAgent,
 		cache:     map[string][]string{},
 	}
 }
@@ -100,6 +112,31 @@ type hubPage struct {
 }
 
 func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, error) {
+	tags, status, err := c.listHubCatalog(ctx, image)
+	if err == nil {
+		return tags, nil
+	}
+	// Hub/Cloudflare often 401/403s the catalog API (empty or blocked User-Agent).
+	// Fall back to the public OCI tag list; do not log tokens.
+	if shouldFallbackToOCI(status) {
+		fallback, ferr := c.listHubRegistry(ctx, image)
+		if ferr == nil {
+			return fallback, nil
+		}
+		return nil, fmt.Errorf("%w; oci fallback: %v", err, ferr)
+	}
+	return nil, err
+}
+
+func shouldFallbackToOCI(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= 500 && status <= 599
+}
+
+func (c *Client) listHubCatalog(ctx context.Context, image ref.Ref) ([]string, int, error) {
 	base := strings.TrimRight(c.HubBase, "/")
 	u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=100", base, image.Path)
 	var tags []string
@@ -107,28 +144,28 @@ func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, er
 	for u != "" {
 		pages++
 		if pages > 50 {
-			return nil, fmt.Errorf("docker hub %s: too many tag pages", image.Path)
+			return nil, 0, fmt.Errorf("docker hub %s: too many tag pages", image.Path)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		c.decorate(req)
 		res, err := c.HTTP.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("docker hub %s: %w", image.Path, err)
+			return nil, 0, fmt.Errorf("docker hub %s: %w", image.Path, err)
 		}
 		body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 		_ = res.Body.Close()
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if res.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("docker hub %s: %s", image.Path, res.Status)
+			return nil, res.StatusCode, fmt.Errorf("docker hub %s: %s", image.Path, res.Status)
 		}
 		var page hubPage
 		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("docker hub decode: %w", err)
+			return nil, 0, fmt.Errorf("docker hub decode: %w", err)
 		}
 		for _, r := range page.Results {
 			if r.Name != "" {
@@ -137,7 +174,13 @@ func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, er
 		}
 		u = page.Next
 	}
-	return tags, nil
+	return tags, http.StatusOK, nil
+}
+
+func (c *Client) listHubRegistry(ctx context.Context, image ref.Ref) ([]string, error) {
+	clone := image
+	clone.Registry = dockerHubRegistry
+	return c.listDistribution(ctx, clone)
 }
 
 type tagsList struct {
@@ -262,10 +305,15 @@ func (c *Client) SetRegistryOverride(host, base string) {
 	c.overrides[host] = strings.TrimRight(base, "/")
 }
 
-func (c *Client) decorate(req *http.Request) {
-	if c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
+func (c *Client) userAgent() string {
+	if c != nil && strings.TrimSpace(c.UserAgent) != "" {
+		return strings.TrimSpace(c.UserAgent)
 	}
+	return DefaultUserAgent
+}
+
+func (c *Client) decorate(req *http.Request) {
+	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("Accept", "application/json")
 }
 

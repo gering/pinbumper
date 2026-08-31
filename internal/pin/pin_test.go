@@ -25,8 +25,8 @@ func TestCaretRangeAcceptsPatchRejectsMajorAndLatest(t *testing.T) {
 	if sel.Allows("3") {
 		t.Fatal("^3.1.0 must reject floating tag 3")
 	}
-	if sel.Allows("3.1") {
-		t.Fatal("^3.1.0 must reject floating tag 3.1")
+	if !sel.Allows("3.1") {
+		t.Fatal("^3.1.0 must accept two-part tag 3.1 as 3.1.0")
 	}
 	if sel.Allows("beta") {
 		t.Fatal("^3.1.0 must reject beta")
@@ -148,6 +148,44 @@ func TestInvalidSpecs(t *testing.T) {
 	}
 	if _, err := New("", "(", ""); err == nil {
 		t.Fatal("bad include should error")
+	}
+}
+
+func TestTwoPartTagsMatchRangeAsPatchZero(t *testing.T) {
+	pg, err := New("^15.0.0", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pg.Allows("15.19") {
+		t.Fatal("^15.0.0 must accept postgres-style 15.19")
+	}
+	if !pg.Allows("15.20") {
+		t.Fatal("^15.0.0 must accept 15.20")
+	}
+	if pg.Allows("16.0") {
+		t.Fatal("^15.0.0 must reject 16.0")
+	}
+	if pg.Allows("15") {
+		t.Fatal("^15.0.0 must reject floating major 15")
+	}
+	got, changed := pg.Choose("15.19", []string{"15", "16.0", "15.19", "15.20", "latest"})
+	if !changed || got != "15.20" {
+		t.Fatalf("got %q changed=%v, want 15.20 true", got, changed)
+	}
+
+	rd, err := New("^7.0.0", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rd.Allows("7.4.11") {
+		t.Fatal("^7.0.0 must still accept 7.4.11")
+	}
+	if rd.Allows("8.0.0") {
+		t.Fatal("^7.0.0 must reject 8.0.0")
+	}
+	got, changed = rd.Choose("7.4.10", []string{"7.4.11", "8.0.0", "latest"})
+	if !changed || got != "7.4.11" {
+		t.Fatalf("got %q changed=%v, want 7.4.11 true", got, changed)
 	}
 }
 

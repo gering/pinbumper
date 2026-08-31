@@ -3,8 +3,8 @@
 // Two independent filters exist; a candidate must pass every filter that is set:
 //
 //   - pinbumper.range — npm/Renovate semver (Masterminds/semver, npm-compatible).
-//     Only strict MAJOR.MINOR.PATCH tags are considered. latest, beta, rc, and
-//     floating tags like "3" or "3.1" are ignored.
+//     MAJOR.MINOR.PATCH and two-part MAJOR.MINOR (treated as MAJOR.MINOR.0)
+//     are considered. latest, beta, rc, and floating majors like "15" are ignored.
 //   - pinbumper.include / pinbumper.exclude — regex against the full tag string
 //     (WUD-style include, optional denylist).
 //
@@ -23,9 +23,9 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// Strict X.Y.Z semver, optional leading v, optional prerelease/build.
-// Rejects floating "3", "3.1", "latest", "beta", "rc".
-var strictSemver = regexp.MustCompile(`(?i)^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
+// Strict X.Y.Z or X.Y semver (X.Y is treated as X.Y.0), optional leading v,
+// optional prerelease/build. Rejects floating majors ("15"), "latest", "beta", "rc".
+var strictSemver = regexp.MustCompile(`(?i)^v?(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
 
 // Selector is the pin policy for one Compose service.
 type Selector struct {
