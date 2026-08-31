@@ -1,31 +1,41 @@
-# Weekly pinbumper run against Portainer CE.
+# Weekly pinbumper on Mars / Portainer.
 #
-# The image CMD is apply — do not set command:. Extra args replace CMD
-# (`docker compose run --rm pinbumper plan` is still a dry-run).
+# Use the LAN Portainer URL (http://192.168.1.16:9000). Do not put Portainer
+# behind Cloudflare — proxied long PUTs can hang.
 #
-# Auth — both options are first-class (pick one):
-#   1) PORTAINER_API_KEY as a Portainer stack Environment variable
-#      (Portainer stores Env on the stack and shows it in the UI).
-#   2) PORTAINER_API_KEY_FILE + bind-mount the key file (see comment below).
+# The pinbumper image CMD is apply — do not set command: on pinbumper.
+# Pin :0.1.0 (optional: ghcr.io/gering/pinbumper:latest).
 #
-# Schedule outside the container, e.g. cron or a systemd timer:
-#   15 3 * * 1 docker compose -f examples/docker-compose.weekly.yml run --rm pinbumper
+# Set PORTAINER_API_KEY as a Portainer stack Environment variable
+# (${PORTAINER_API_KEY}). Do not commit the API key.
 #
-# Do not commit API keys.
-
-services:
-  pinbumper:
-    build:
-      context: ..
-    image: pinbumper:local
-    environment:
-      PORTAINER_URL: http://192.168.1.16:9000
-      PORTAINER_API_KEY: ${PORTAINER_API_KEY}
-    restart: "no"
-
+# Ofelia starts the pinbumper container weekly (Monday 03:15).
+# Ofelia uses a 6-field cron (seconds first): 0 15 3 * * 1
+#
 # File-based key (equal alternative): drop PORTAINER_API_KEY and instead set
 #   environment:
 #     PORTAINER_URL: http://192.168.1.16:9000
 #     PORTAINER_API_KEY_FILE: /run/portainer-key
 #   volumes:
 #     - ${PORTAINER_API_KEY_FILE:-./portainer-api.key}:/run/portainer-key:ro
+
+services:
+  pinbumper:
+    image: ghcr.io/gering/pinbumper:0.1.0
+    container_name: pinbumper
+    environment:
+      PORTAINER_URL: http://192.168.1.16:9000
+      PORTAINER_API_KEY: ${PORTAINER_API_KEY}
+    restart: "no"
+
+  ofelia:
+    image: mcuadros/ofelia:latest
+    depends_on:
+      - pinbumper
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    labels:
+      ofelia.job-run.pinbumper.schedule: "0 15 3 * * 1"
+      ofelia.job-run.pinbumper.container: pinbumper

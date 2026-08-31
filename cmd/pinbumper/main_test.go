@@ -162,14 +162,24 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(b)
-	if strings.Contains(text, "\n    command:") || strings.Contains(text, "\n  command:") {
-		t.Fatal("weekly example must omit command: (image CMD is apply)")
+	pin := serviceBlock(text, "pinbumper")
+	if pin == "" {
+		t.Fatal("weekly example must define a pinbumper service")
 	}
-	if !strings.Contains(text, "PORTAINER_URL: http://192.168.1.16:9000") {
+	if strings.Contains(pin, "\n    command:") {
+		t.Fatal("weekly example must omit command: on pinbumper (image CMD is apply)")
+	}
+	if !strings.Contains(pin, "image: ghcr.io/gering/pinbumper:0.1.0") {
+		t.Fatal("weekly example must pin ghcr.io/gering/pinbumper:0.1.0")
+	}
+	if !strings.Contains(pin, "PORTAINER_URL: http://192.168.1.16:9000") {
 		t.Fatal("weekly example must set PORTAINER_URL")
 	}
-	if !strings.Contains(text, "PORTAINER_API_KEY: ${PORTAINER_API_KEY}") {
+	if !strings.Contains(pin, "PORTAINER_API_KEY: ${PORTAINER_API_KEY}") {
 		t.Fatal("weekly example must show PORTAINER_API_KEY: ${PORTAINER_API_KEY}")
+	}
+	if strings.Contains(pin, "restart: always") || strings.Contains(pin, "restart: unless-stopped") {
+		t.Fatal("pinbumper must not use restart always/unless-stopped")
 	}
 	if !strings.Contains(text, "PORTAINER_API_KEY_FILE") {
 		t.Fatal("weekly example must document the file-based key option")
@@ -177,4 +187,48 @@ func TestWeeklyExampleOmitsCommand(t *testing.T) {
 	if strings.Contains(text, "PINBUMPER_") {
 		t.Fatal("weekly example must not mention PINBUMPER_* env vars")
 	}
+	if strings.Contains(text, "--interval") {
+		t.Fatal("weekly example must not use --interval daemon")
+	}
+	ofelia := serviceBlock(text, "ofelia")
+	if ofelia == "" {
+		t.Fatal("weekly example must include an Ofelia sidecar")
+	}
+	if !strings.Contains(ofelia, "image: mcuadros/ofelia:latest") {
+		t.Fatal("ofelia must use mcuadros/ofelia:latest")
+	}
+	if !strings.Contains(ofelia, "/var/run/docker.sock:/var/run/docker.sock") {
+		t.Fatal("ofelia must mount docker.sock")
+	}
+	if !strings.Contains(ofelia, "ofelia.job-run.pinbumper.schedule: \"0 15 3 * * 1\"") {
+		t.Fatal("ofelia job-run must be weekly Monday 03:15 (0 15 3 * * 1)")
+	}
+	if !strings.Contains(ofelia, "ofelia.job-run.pinbumper.container: pinbumper") {
+		t.Fatal("ofelia job-run must start the pinbumper service")
+	}
+	if !strings.Contains(text, "Cloudflare") {
+		t.Fatal("weekly example must warn against Cloudflare in front of Portainer")
+	}
+}
+
+func serviceBlock(compose, name string) string {
+	lines := strings.Split(compose, "\n")
+	var b strings.Builder
+	in := false
+	for _, line := range lines {
+		if line == "  "+name+":" {
+			in = true
+			b.WriteString(line)
+			b.WriteByte('\n')
+			continue
+		}
+		if in {
+			if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    ") && strings.HasSuffix(line, ":") && !strings.HasPrefix(line, "  #") {
+				break
+			}
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }

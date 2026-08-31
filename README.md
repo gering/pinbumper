@@ -178,6 +178,12 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 go install github.com/gering/pinbumper/cmd/pinbumper@latest
 ```
 
+Or pull the published `linux/amd64` image (`:latest` is also pushed on `main`):
+
+```bash
+docker pull ghcr.io/gering/pinbumper:0.1.0
+```
+
 Or build a local image:
 
 ```bash
@@ -185,7 +191,7 @@ docker build -t pinbumper:local .
 docker run --rm -v "$PWD:/work:ro" pinbumper:local plan --compose-file /work/docker-compose.yml
 ```
 
-A weekly Portainer example (env-only, no `command:`) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Schedule with cron or a systemd timer; do not commit API keys.
+A weekly Portainer / Mars example (Ofelia sidecar, no `command:` on pinbumper) is in [`examples/docker-compose.weekly.yml`](examples/docker-compose.weekly.yml). Images publish to `ghcr.io/gering/pinbumper` on `main` and `v*` tags. Do not commit API keys.
 
 ## CLI
 
