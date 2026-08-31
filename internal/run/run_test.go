@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -253,6 +254,82 @@ services:
 	}
 	if len(putIDs) != 1 || !strings.Contains(putIDs[0], "/stacks/2") {
 		t.Fatalf("should PUT only the good stack, got %v", putIDs)
+	}
+}
+
+func TestPlanSkipsRegistry403StillReportsOthers(t *testing.T) {
+	const y = `
+services:
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.0
+    labels:
+      pinbumper.range: "^3.1.0"
+  postgres:
+    image: postgres:15.19
+    labels:
+      pinbumper.range: "^15.0.0"
+  redis:
+    image: redis:7.4.11
+    labels:
+      pinbumper.range: "^7.0.0"
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "docker-compose.yml")
+	if err := os.WriteFile(path, []byte(y), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lister := registry.MapLister{
+		Tags: map[string][]string{
+			"ghcr.io/paperless-ngx/paperless-ngx": {"latest", "3.1.0", "3.1.1", "4.0.0"},
+			"docker.io/library/redis":             {"7.4.11", "7.4.10", "8.0.0"},
+		},
+		Errs: map[string]error{
+			"docker.io/library/postgres": fmt.Errorf("docker hub library/postgres: 403 Forbidden"),
+		},
+	}
+	var out, errb bytes.Buffer
+	err := Run(context.Background(), Options{
+		Mode: Plan, ComposeFiles: []string{path}, Tags: lister,
+		Stdout: &out, Stderr: &errb,
+	})
+	if err != nil {
+		t.Fatalf("plan must not fail because one registry 403'd: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "3.1.0 -> 3.1.1") {
+		t.Fatalf("paperless BUMP missing:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "redis") || !strings.Contains(out.String(), "NOOP") {
+		t.Fatalf("redis NOOP missing:\n%s", out.String())
+	}
+	if !strings.Contains(errb.String(), "skip") || !strings.Contains(errb.String(), "postgres") {
+		t.Fatalf("postgres 403 should be skipped and logged:\n%s", errb.String())
+	}
+	if strings.Contains(out.String(), "ERROR") || strings.Contains(errb.String(), "ERROR") {
+		t.Fatalf("registry 403 must not be a failing ERROR:\n%s\n%s", out.String(), errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	err = Run(context.Background(), Options{
+		Mode: Apply, ComposeFiles: []string{path}, Tags: lister, SkipDeploy: true,
+		Stdout: &out, Stderr: &errb,
+	})
+	if err != nil {
+		t.Fatalf("apply must not fail because one registry 403'd: %v\n%s", err, errb.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.Contains(text, "paperless-ngx:3.1.1") {
+		t.Fatalf("paperless should still bump:\n%s", text)
+	}
+	if !strings.Contains(text, "postgres:15.19") || strings.Contains(text, "postgres:15.20") {
+		t.Fatal("403'd postgres must stay pinned")
+	}
+	if !strings.Contains(text, "redis:7.4.11") {
+		t.Fatal("redis pin changed")
 	}
 }
 

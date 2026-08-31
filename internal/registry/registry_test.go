@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gering/pinbumper/internal/ref"
@@ -13,6 +14,10 @@ import (
 func TestDockerHubPagination(t *testing.T) {
 	var page int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.UserAgent()) == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		page++
 		w.Header().Set("Content-Type", "application/json")
 		if page == 1 {
@@ -105,5 +110,119 @@ func TestMapLister(t *testing.T) {
 	tags, err := l.ListTags(context.Background(), img)
 	if err != nil || tags[0] != "3.1.1" {
 		t.Fatalf("%v %v", tags, err)
+	}
+}
+
+func TestDockerHubRequiresUserAgent(t *testing.T) {
+	var saw []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua := r.UserAgent()
+		saw = append(saw, ua)
+		if strings.TrimSpace(ua) == "" {
+			// Hub/Cloudflare 403s an empty User-Agent; this is the regression.
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"next":    "",
+			"results": []map[string]string{{"name": "7.4.11"}, {"name": "15.19"}},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.Client())
+	c.HubBase = ts.URL
+	c.UserAgent = "" // even a cleared field must still send the default
+	// If listing falls through to the OCI registry, fail instead of passing via fallback.
+	c.SetRegistryOverride(dockerHubRegistry, "http://127.0.0.1:1")
+
+	for _, image := range []string{"redis:7.4.11", "postgres:15.19"} {
+		img, err := ref.Parse(image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags, err := c.ListTags(context.Background(), img)
+		if err != nil {
+			t.Fatalf("%s: ListTags: %v (empty User-Agent must not be sent)", image, err)
+		}
+		if len(tags) == 0 {
+			t.Fatalf("%s: no tags", image)
+		}
+	}
+	if len(saw) == 0 {
+		t.Fatal("hub was not contacted")
+	}
+	for _, ua := range saw {
+		if strings.TrimSpace(ua) == "" {
+			t.Fatal("User-Agent must not be empty; Hub returns 403")
+		}
+	}
+}
+
+func TestDockerHubPageCapStays50(t *testing.T) {
+	var pages int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		next := "http://" + r.Host + "/v2/repositories/library/redis/tags?page=more"
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"next":    next,
+			"results": []map[string]string{{"name": "x"}},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewClient(ts.Client())
+	c.HubBase = ts.URL
+	c.SetRegistryOverride(dockerHubRegistry, "http://127.0.0.1:1")
+	img, err := ref.Parse("redis:7.4.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListTags(context.Background(), img)
+	if err == nil || !strings.Contains(err.Error(), "too many tag pages") {
+		t.Fatalf("want page-cap error, got %v", err)
+	}
+	if pages != 50 {
+		t.Fatalf("listed %d pages, want 50", pages)
+	}
+}
+
+func TestDockerHubFallsBackToRegistryOn403(t *testing.T) {
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer hub.Close()
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(r.UserAgent()) == "" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.URL.Path != "/v2/library/postgres/tags/list" && r.URL.Path != "/v2/library/redis/tags/list" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tags": []string{"15.19", "7.4.11"},
+		})
+	}))
+	defer reg.Close()
+
+	c := NewClient(hub.Client())
+	c.HubBase = hub.URL
+	c.SetRegistryOverride(dockerHubRegistry, reg.URL)
+
+	for _, image := range []string{"postgres:15.19", "redis:7.4.11"} {
+		img, err := ref.Parse(image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags, err := c.ListTags(context.Background(), img)
+		if err != nil {
+			t.Fatalf("%s: fallback ListTags: %v", image, err)
+		}
+		if len(tags) != 2 {
+			t.Fatalf("%s: tags %v", image, tags)
+		}
 	}
 }

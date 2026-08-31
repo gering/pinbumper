@@ -48,6 +48,7 @@ type Decision struct {
 	NewRef  string
 	Changed bool
 	Reason  string
+	Skipped bool // tag-list failure; logged, does not fail the run
 	Err     error
 }
 
@@ -129,7 +130,7 @@ func Run(ctx context.Context, opt Options) error {
 			dec := decide(ctx, opt, d.src, svc)
 			decisions = append(decisions, dec)
 			printDecision(opt, dec)
-			if dec.Err != nil {
+			if dec.Err != nil && !dec.Skipped {
 				failed = true
 			}
 		}
@@ -281,7 +282,10 @@ func decide(ctx context.Context, opt Options, src Source, svc compose.Service) D
 	dec := Decision{Source: src, Service: svc, From: svc.Image.Tag}
 	tags, err := opt.Tags.ListTags(ctx, svc.Image)
 	if err != nil {
+		// Same spirit as skip+log for a bad stack: one registry 403 must not
+		// abort BUMP/NOOP for the other services.
 		dec.Err = err
+		dec.Skipped = true
 		dec.Reason = "list tags"
 		return dec
 	}
@@ -302,6 +306,8 @@ func decide(ctx context.Context, opt Options, src Source, svc compose.Service) D
 func printDecision(opt Options, dec Decision) {
 	loc := dec.Source.Kind + ":" + dec.Source.Name
 	switch {
+	case dec.Skipped:
+		fmt.Fprintf(opt.errw(), "skip %s/%s: %v\n", loc, dec.Service.Name, dec.Err)
 	case dec.Err != nil:
 		fmt.Fprintf(opt.errw(), "ERROR  %s  %s  %v\n", loc, dec.Service.Name, dec.Err)
 	case dec.Changed:
