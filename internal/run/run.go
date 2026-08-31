@@ -344,6 +344,13 @@ func decideFollow(ctx context.Context, opt Options, src Source, svc compose.Serv
 		return dec
 	}
 	current := runningDigest(ctx, opt, src, svc)
+	if current == "" {
+		// Empty after image inspect must not silent-FOLLOW (would PUT every run).
+		dec.Skipped = true
+		dec.Reason = "no running digest"
+		dec.Err = fmt.Errorf("no running image digest after image inspect")
+		return dec
+	}
 	dec.Follow = true
 	dec.To = follow
 	dec.FromDigest = current

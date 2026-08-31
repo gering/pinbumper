@@ -73,7 +73,7 @@ services:
 
 `plan` prints `FOLLOW latest@sha256:abc… -> sha256:def…` (or `NOOP` if the running RepoDigest already matches). `apply` PUTs the **same** compose (Portainer: existing `Env` array, `PullImage` / `RepullImageAndRedeploy` true) or runs `docker compose` with `--pull always`. No auto-rollback.
 
-The image tag must equal `follow`; a mismatch is skipped and logged (no crash). Follow looks up the digest via Docker Hub and GHCR (same User-Agent and OCI fallback as tag listing). It does **not** semver-sort `latest` / `main`.
+The image tag must equal `follow`; a mismatch is skipped and logged (no crash). If image inspect still has no RepoDigest, follow is skipped and logged (no silent PUT). Follow looks up the digest via Docker Hub and GHCR (same User-Agent and OCI fallback as tag listing). It does **not** semver-sort `latest` / `main`.
 
 If `pinbumper.range` or `pinbumper.include` is also set, **range/include wins**. Follow is ignored — it is only for digest-of-current-tag, not for choosing a new tag.
 
@@ -187,7 +187,7 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 2. **List tags** from Docker Hub (Hub catalog API, with a User-Agent; OCI `registry-1.docker.io` fallback on Hub 401/403, and also 429/5xx) or GHCR / other registries (OCI distribution + bearer challenge). For `pinbumper.follow`, look up the **manifest digest** for the current tag the same way (Hub tag API + OCI fallback). `GITHUB_TOKEN` is optional for GHCR rate limits. Tokens are never logged. If the OCI fallback also fails, the skip/log includes the catalog status and the fallback error.
 3. **Choose**
    - range/include: the newest tag allowed by the service’s labels. Same as current pin → noop. `latest` / `main` are never semver candidates.
-   - follow: compare the registry digest to the running **image** RepoDigest (Portainer image inspect, or local `docker image inspect` — not container inspect). Different → digest-only bump. Same → noop. Image tag ≠ follow → skip and log.
+   - follow: compare the registry digest to the running **image** RepoDigest (Portainer image inspect, or local `docker image inspect` — not container inspect). Different → digest-only bump. Same → noop. Image tag ≠ follow, or no running RepoDigest after image inspect → skip and log (no silent PUT).
 4. **Rewrite** only the image tag in the original YAML (comments and key order stay). Follow does **not** rewrite the image line.
 5. **Deploy**
    - Local: `docker compose -f FILE up -d --pull always --no-deps <changed services>` (or `--skip-deploy` to only write the file).

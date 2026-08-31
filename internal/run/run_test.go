@@ -765,6 +765,108 @@ func TestFollowUsesImageInspectRepoDigestsNotContainer(t *testing.T) {
 	}
 }
 
+func TestFollowEmptyRunningDigestSkipNoPUT(t *testing.T) {
+	const imageID = "sha256:imgid123"
+	env := []portainer.EnvVar{{Name: "VW_ADMIN_TOKEN", Value: "s3cret-do-not-wipe"}}
+	var puts int
+	var imageInspects int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "test-key" {
+			http.Error(w, "no", 401)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks":
+			_ = json.NewEncoder(w).Encode([]portainer.Stack{{
+				ID: 9, Name: "vaultwarden", Type: portainer.TypeCompose, EndpointID: 1, Env: env,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/9/file":
+			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: vaultwardenFollowYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/containers/json":
+			_ = json.NewEncoder(w).Encode([]portainer.Container{{
+				ID:      "ctr1",
+				Image:   "vaultwarden/server:latest",
+				ImageID: imageID,
+				Created: 100,
+				State:   "running",
+				Labels: map[string]string{
+					"com.docker.compose.project": "vaultwarden",
+					"com.docker.compose.service": "vaultwarden",
+				},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/images/"+imageID+"/json":
+			imageInspects++
+			_ = json.NewEncoder(w).Encode(portainer.ImageInspect{
+				ID:          imageID,
+				RepoDigests: []string{}, // image inspect ran; still no digest
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/stacks/9":
+			puts++
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	client, err := portainer.New(ts.URL, secret.String("test-key"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	err = Run(context.Background(), Options{
+		Mode:      Apply,
+		Portainer: client,
+		Tags:      registry.MapLister{Tags: map[string][]string{}},
+		Digests:   vaultwardenDigester("sha256:newdigest"),
+		PullImage: true,
+		Stdout:    &out,
+		Stderr:    &errb,
+	})
+	if err != nil {
+		t.Fatalf("empty running digest must skip, not fail the run: %v\n%s", err, errb.String())
+	}
+	if imageInspects == 0 {
+		t.Fatal("must still image-inspect before skipping")
+	}
+	if puts != 0 {
+		t.Fatalf("empty running digest must not PUT, got %d", puts)
+	}
+	if strings.Contains(out.String(), "FOLLOW") {
+		t.Fatalf("must not silent FOLLOW:\n%s", out.String())
+	}
+	if !strings.Contains(errb.String(), "skip") || !strings.Contains(errb.String(), "image inspect") {
+		t.Fatalf("want skip+log after empty image inspect:\n%s", errb.String())
+	}
+}
+
+func TestFollowEmptyCurrentDigestSkip(t *testing.T) {
+	puts := 0
+	client := vaultwardenPortainer(t, vaultwardenFollowYAML, nil, &puts)
+	var out, errb bytes.Buffer
+	err := Run(context.Background(), Options{
+		Mode:          Apply,
+		Portainer:     client,
+		Tags:          registry.MapLister{Tags: map[string][]string{}},
+		Digests:       vaultwardenDigester("sha256:newdigest"),
+		CurrentDigest: followCurrent(""),
+		PullImage:     true,
+		Stdout:        &out,
+		Stderr:        &errb,
+	})
+	if err != nil {
+		t.Fatalf("empty current digest must skip: %v", err)
+	}
+	if puts != 0 {
+		t.Fatalf("must not PUT, got %d", puts)
+	}
+	if strings.Contains(out.String(), "FOLLOW") {
+		t.Fatalf("must not FOLLOW:\n%s", out.String())
+	}
+	if !strings.Contains(errb.String(), "skip") {
+		t.Fatalf("want skip+log:\n%s", errb.String())
+	}
+}
+
 func TestFollowImageTagMismatchSkip(t *testing.T) {
 	const y = `
 services:
