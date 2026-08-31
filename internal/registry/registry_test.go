@@ -188,41 +188,72 @@ func TestDockerHubPageCapStays50(t *testing.T) {
 	}
 }
 
-func TestDockerHubFallsBackToRegistryOn403(t *testing.T) {
+func TestDockerHubFallsBackToRegistry(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, http.StatusText(status), status)
+			}))
+			defer hub.Close()
+			reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.TrimSpace(r.UserAgent()) == "" {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+				if r.URL.Path != "/v2/library/postgres/tags/list" && r.URL.Path != "/v2/library/redis/tags/list" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"tags": []string{"15.19", "7.4.11"},
+				})
+			}))
+			defer reg.Close()
+
+			c := NewClient(hub.Client())
+			c.HubBase = hub.URL
+			c.SetRegistryOverride(dockerHubRegistry, reg.URL)
+
+			for _, image := range []string{"postgres:15.19", "redis:7.4.11"} {
+				img, err := ref.Parse(image)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tags, err := c.ListTags(context.Background(), img)
+				if err != nil {
+					t.Fatalf("%s: fallback ListTags: %v", image, err)
+				}
+				if len(tags) != 2 {
+					t.Fatalf("%s: tags %v", image, tags)
+				}
+			}
+		})
+	}
+}
+
+func TestDockerHubFallbackErrorIncludesCatalogAndOCI(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 	}))
 	defer hub.Close()
 	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.TrimSpace(r.UserAgent()) == "" {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		if r.URL.Path != "/v2/library/postgres/tags/list" && r.URL.Path != "/v2/library/redis/tags/list" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tags": []string{"15.19", "7.4.11"},
-		})
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer reg.Close()
 
 	c := NewClient(hub.Client())
 	c.HubBase = hub.URL
 	c.SetRegistryOverride(dockerHubRegistry, reg.URL)
-
-	for _, image := range []string{"postgres:15.19", "redis:7.4.11"} {
-		img, err := ref.Parse(image)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tags, err := c.ListTags(context.Background(), img)
-		if err != nil {
-			t.Fatalf("%s: fallback ListTags: %v", image, err)
-		}
-		if len(tags) != 2 {
-			t.Fatalf("%s: tags %v", image, tags)
-		}
+	img, err := ref.Parse("postgres:15.19")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListTags(context.Background(), img)
+	if err == nil {
+		t.Fatal("want combined catalog+fallback error")
+	}
+	s := err.Error()
+	if !strings.Contains(s, "403") || !strings.Contains(s, "oci fallback") || !strings.Contains(s, "503") {
+		t.Fatalf("want catalog 403 and fallback 503, got %v", err)
 	}
 }

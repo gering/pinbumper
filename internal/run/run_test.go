@@ -281,10 +281,10 @@ services:
 	lister := registry.MapLister{
 		Tags: map[string][]string{
 			"ghcr.io/paperless-ngx/paperless-ngx": {"latest", "3.1.0", "3.1.1", "4.0.0"},
-			"docker.io/library/redis":             {"7.4.11", "7.4.10", "8.0.0"},
 		},
 		Errs: map[string]error{
 			"docker.io/library/postgres": fmt.Errorf("docker hub library/postgres: 403 Forbidden"),
+			"docker.io/library/redis":    fmt.Errorf("docker hub library/redis: 403 Forbidden"),
 		},
 	}
 	var out, errb bytes.Buffer
@@ -298,11 +298,11 @@ services:
 	if !strings.Contains(out.String(), "3.1.0 -> 3.1.1") {
 		t.Fatalf("paperless BUMP missing:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "redis") || !strings.Contains(out.String(), "NOOP") {
-		t.Fatalf("redis NOOP missing:\n%s", out.String())
-	}
 	if !strings.Contains(errb.String(), "skip") || !strings.Contains(errb.String(), "postgres") {
 		t.Fatalf("postgres 403 should be skipped and logged:\n%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "redis") {
+		t.Fatalf("redis 403 should be skipped and logged:\n%s", errb.String())
 	}
 	if strings.Contains(out.String(), "ERROR") || strings.Contains(errb.String(), "ERROR") {
 		t.Fatalf("registry 403 must not be a failing ERROR:\n%s\n%s", out.String(), errb.String())

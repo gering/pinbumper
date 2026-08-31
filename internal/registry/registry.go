@@ -116,14 +116,24 @@ func (c *Client) listDockerHub(ctx context.Context, image ref.Ref) ([]string, er
 	if err == nil {
 		return tags, nil
 	}
-	// Hub/Cloudflare often 403s the catalog API (empty or blocked User-Agent).
+	// Hub/Cloudflare often 401/403s the catalog API (empty or blocked User-Agent).
 	// Fall back to the public OCI tag list; do not log tokens.
-	if status == http.StatusForbidden || status == http.StatusUnauthorized {
-		if fallback, ferr := c.listHubRegistry(ctx, image); ferr == nil {
+	if shouldFallbackToOCI(status) {
+		fallback, ferr := c.listHubRegistry(ctx, image)
+		if ferr == nil {
 			return fallback, nil
 		}
+		return nil, fmt.Errorf("%w; oci fallback: %v", err, ferr)
 	}
 	return nil, err
+}
+
+func shouldFallbackToOCI(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	}
+	return status >= 500 && status <= 599
 }
 
 func (c *Client) listHubCatalog(ctx context.Context, image ref.Ref) ([]string, int, error) {

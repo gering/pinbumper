@@ -98,8 +98,8 @@ pinbumper apply --compose-file docker-compose.yml
 
 | Command | Effect |
 |---|---|
-| `pinbumper plan …` | Discover, list tags, print `BUMP` / `NOOP`. **Writes nothing.** Tag-list failures (e.g. Hub 403) skip that service and continue; the run still exits 0 if other services planned. |
-| `pinbumper apply …` | Same plan, then rewrite pins and deploy. Non-zero exit on deploy/rewrite failure — not on a skipped registry 403. |
+| `pinbumper plan …` | Discover, list tags, print `BUMP` / `NOOP`. **Writes nothing.** Tag-list failures (e.g. Hub 401/403) skip that service and continue; the run still exits 0 if other services planned. |
+| `pinbumper apply …` | Same plan, then rewrite pins and deploy. Non-zero exit on deploy/rewrite failure — not on a skipped registry 401/403. |
 
 `apply` is the default (`pinbumper --portainer-url …` and the image `CMD`). `plan` is always an explicit dry-run. If the newest allowed tag is already the current pin, the result is `NOOP`.
 
@@ -116,7 +116,7 @@ Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or anoth
 
 `--tls-skip-verify` applies to **Portainer only** (LAN HTTPS). Docker Hub / GHCR keep TLS verification.
 
-A weekly unfiltered run (no `--stack`) **skips** stacks it cannot read or parse (invalid labels, missing stack file, git-backed) and continues with the rest. Git-backed stacks are never PUT. The same skip+log applies to a single service whose registry returns 403 (or any other tag-list error): other services in that stack still `BUMP` / `NOOP`.
+A weekly unfiltered run (no `--stack`) **skips** stacks it cannot read or parse (invalid labels, missing stack file, git-backed) and continues with the rest. Git-backed stacks are never PUT. The same skip+log applies to a single service whose registry returns 401/403 (or any other tag-list error): other services in that stack still `BUMP` / `NOOP`. If every labeled service is skipped, the run still exits 0 (same as an empty stack list).
 
 The key is sent as `X-API-Key` and is never logged. **Both** of these are first-class (pick one):
 
@@ -164,7 +164,7 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 ## What apply does
 
 1. **Discover** local `--compose-file` paths and/or every Portainer compose/swarm stack.
-2. **List tags** from Docker Hub (Hub catalog API, with a User-Agent; OCI `registry-1.docker.io` if Hub 403s) or GHCR / other registries (OCI distribution + bearer challenge). `GITHUB_TOKEN` is optional for GHCR rate limits. Tokens are never logged.
+2. **List tags** from Docker Hub (Hub catalog API, with a User-Agent; OCI `registry-1.docker.io` fallback on Hub 401/403, and also 429/5xx) or GHCR / other registries (OCI distribution + bearer challenge). `GITHUB_TOKEN` is optional for GHCR rate limits. Tokens are never logged. If the OCI fallback also fails, the skip/log includes the catalog status and the fallback error.
 3. **Choose** the newest tag allowed by the service’s labels. Same as current pin → noop.
 4. **Rewrite** only the image tag in the original YAML (comments and key order stay).
 5. **Deploy**
