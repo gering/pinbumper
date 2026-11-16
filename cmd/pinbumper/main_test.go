@@ -125,6 +125,14 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if !strings.Contains(text, "deploy-timeout") || !strings.Contains(text, "skip-deploy") {
 		t.Fatal("usage must document deploy-timeout and skip-deploy")
 	}
+	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval"} {
+		if !strings.Contains(text, flag) {
+			t.Fatalf("usage must document %s", flag)
+		}
+	}
+	if !strings.Contains(text, "default 20m") || !strings.Contains(text, "default 5s") {
+		t.Fatal("usage must document deploy wait defaults")
+	}
 	if strings.Contains(text, "PINBUMPER_") {
 		t.Fatal("usage must not mention PINBUMPER_* env vars")
 	}
@@ -139,6 +147,26 @@ func TestNoArgsIsApplyNotHelp(t *testing.T) {
 	code := runMain(nil)
 	if code != 2 {
 		t.Fatalf("no discovery args: exit %d, want 2 (apply missing URL/file; old PINBUMPER_PORTAINER_URL must be ignored)", code)
+	}
+}
+
+func TestDeployWaitFlags(t *testing.T) {
+	t.Setenv("PORTAINER_URL", "")
+	path := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(path, []byte("services:\n  app:\n    image: example/app:1.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval"} {
+		for _, value := range []string{"0s", "-1s", "not-a-duration"} {
+			t.Run(flag+"="+value, func(t *testing.T) {
+				if code := runMain([]string{"plan", "--compose-file", path, flag + "=" + value}); code != 2 {
+					t.Fatalf("invalid deploy wait: exit %d, want 2", code)
+				}
+			})
+		}
+	}
+	if code := runMain([]string{"plan", "--compose-file", path, "--deploy-wait-timeout=50ms", "--deploy-wait-interval=1ms"}); code != 0 {
+		t.Fatalf("valid deploy wait flags: exit %d, want 0", code)
 	}
 }
 

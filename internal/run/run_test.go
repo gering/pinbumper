@@ -132,6 +132,8 @@ services:
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/3/file":
 			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: stackYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/3":
+			_ = json.NewEncoder(w).Encode(portainer.Stack{ID: 3, Status: portainer.StackStatusActive})
 		case r.Method == http.MethodPut && r.URL.Path == "/api/stacks/3":
 			putBody, _ = io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusOK)
@@ -215,6 +217,8 @@ services:
 			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: badYAML})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/2/file":
 			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: goodYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/2":
+			_ = json.NewEncoder(w).Encode(portainer.Stack{ID: 2, Status: portainer.StackStatusActive})
 		case r.Method == http.MethodPut:
 			putIDs = append(putIDs, r.URL.Path)
 			w.WriteHeader(http.StatusOK)
@@ -397,6 +401,8 @@ services:
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/3/file":
 			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: stackYAML})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/3":
+			_ = json.NewEncoder(w).Encode(portainer.Stack{ID: 3, Status: portainer.StackStatusActive})
 		case r.Method == http.MethodPut:
 			puts++
 			w.WriteHeader(http.StatusOK)
@@ -511,6 +517,8 @@ func vaultwardenPortainer(t *testing.T, yaml string, putBody *[]byte, puts *int)
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/9/file":
 			_ = json.NewEncoder(w).Encode(portainer.FileContent{StackFileContent: yaml})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/stacks/9":
+			_ = json.NewEncoder(w).Encode(portainer.Stack{ID: 9, Status: portainer.StackStatusActive})
 		case r.Method == http.MethodPut && r.URL.Path == "/api/stacks/9":
 			if puts != nil {
 				*puts++

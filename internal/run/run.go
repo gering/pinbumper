@@ -57,20 +57,22 @@ type Decision struct {
 
 // Options configure a run.
 type Options struct {
-	Mode          Mode
-	ComposeFiles  []string
-	Portainer     *portainer.Client
-	StackFilter   []string
-	Tags          registry.Lister
-	Digests       registry.Digester
-	CurrentDigest func(ctx context.Context, src Source, svc compose.Service) (string, error)
-	Deploy        Deployer
-	SkipDeploy    bool
-	PullImage     bool
-	HealthTimeout time.Duration
-	PollEvery     time.Duration
-	Stdout        io.Writer
-	Stderr        io.Writer
+	Mode               Mode
+	ComposeFiles       []string
+	Portainer          *portainer.Client
+	StackFilter        []string
+	Tags               registry.Lister
+	Digests            registry.Digester
+	CurrentDigest      func(ctx context.Context, src Source, svc compose.Service) (string, error)
+	Deploy             Deployer
+	SkipDeploy         bool
+	PullImage          bool
+	HealthTimeout      time.Duration
+	PollEvery          time.Duration
+	DeployWaitTimeout  time.Duration
+	DeployWaitInterval time.Duration
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 // Deployer recreates local compose services after a file rewrite.
@@ -107,6 +109,9 @@ func (o Options) errw() io.Writer {
 func Run(ctx context.Context, opt Options) error {
 	if opt.Tags == nil {
 		return fmt.Errorf("tag lister is required")
+	}
+	if opt.DeployWaitTimeout < 0 || opt.DeployWaitInterval < 0 {
+		return fmt.Errorf("deploy wait timeout and interval must be positive")
 	}
 	if opt.HealthTimeout == 0 {
 		opt.HealthTimeout = 10 * time.Minute
@@ -513,6 +518,9 @@ func applyDoc(ctx context.Context, opt Options, src Source, text string, group [
 		}
 		putAt := time.Now().Add(-2 * time.Second).Unix() // clock skew / second granularity
 		if err := opt.Portainer.UpdateStack(ctx, src.Stack, text, opt.PullImage); err != nil {
+			return err
+		}
+		if err := opt.Portainer.WaitStackDeploy(ctx, src.Stack.ID, opt.DeployWaitTimeout, opt.DeployWaitInterval); err != nil {
 			return err
 		}
 		fmt.Fprintf(opt.out(), "updated portainer stack %s (id %d)\n", src.Stack.Name, src.Stack.ID)
