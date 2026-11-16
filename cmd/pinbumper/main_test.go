@@ -143,6 +143,11 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if !strings.Contains(text, "Portainer's 15m deployment context") || !strings.Contains(text, "capped by the\nremaining --deploy-wait-timeout") {
 		t.Fatal("usage must explain the error grace default and remaining timeout cap")
 	}
+	for _, want := range []string{"only while Deploy continues after a failed undeploy", "DeploymentStartStatus 4", "exactly two history statuses [3,4]", "Other Status 4 failures are immediate"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("usage must explain the narrow error grace condition: missing %q", want)
+		}
+	}
 	if !strings.Contains(text, "SIGINT") || !strings.Contains(text, "SIGTERM") || !strings.Contains(text, "cancel") {
 		t.Fatal("usage must document cancellation on SIGINT and SIGTERM")
 	}

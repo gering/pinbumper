@@ -192,7 +192,7 @@ func TestGetStack(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"Id":7,"Name":"paperless","Type":2,"EndpointId":3,"Status":3,"Env":[{"name":"TZ","value":"UTC"}],"DeploymentStatus":[{"Message":"Pulling image"},{"Message":"Starting containers"}]}`))
+		_, _ = w.Write([]byte(`{"Id":7,"Name":"paperless","Type":2,"EndpointId":3,"Status":4,"DeploymentStartStatus":4,"Env":[{"name":"TZ","value":"UTC"}],"DeploymentStatus":[{"Status":3,"Message":"Deploying"},{"Status":4,"Message":"Undeploy failed"}]}`))
 	}))
 	defer ts.Close()
 	c, err := New(ts.URL, secret.String("test-key"), ts.Client())
@@ -203,13 +203,14 @@ func TestGetStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stack.ID != 7 || stack.Name != "paperless" || stack.Type != TypeCompose || stack.EndpointID != 3 || stack.Status != StackStatusDeploying {
+	if stack.ID != 7 || stack.Name != "paperless" || stack.Type != TypeCompose || stack.EndpointID != 3 || stack.Status != StackStatusError || stack.DeploymentStartStatus != StackStatusError {
 		t.Fatalf("stack: %+v", stack)
 	}
 	if len(stack.Env) != 1 || stack.Env[0].Name != "TZ" || stack.Env[0].Value != "UTC" {
 		t.Fatalf("env: %+v", stack.Env)
 	}
-	if len(stack.DeploymentStatus) != 2 || stack.DeploymentStatus[0].Message != "Pulling image" || stack.DeploymentStatus[1].Message != "Starting containers" {
+	if len(stack.DeploymentStatus) != 2 || stack.DeploymentStatus[0].Status != StackStatusDeploying || stack.DeploymentStatus[1].Status != StackStatusError ||
+		stack.DeploymentStatus[0].Message != "Deploying" || stack.DeploymentStatus[1].Message != "Undeploy failed" {
 		t.Fatalf("deployment status: %+v", stack.DeploymentStatus)
 	}
 }
@@ -282,7 +283,9 @@ func TestWaitStackDeployTransientError(t *testing.T) {
 				if i >= len(statuses) {
 					i = len(statuses) - 1
 				}
-				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: statuses[i]})
+				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: statuses[i], DeploymentStartStatus: StackStatusError,
+					DeploymentStatus: []StackDeploymentStatus{{Status: StackStatusDeploying}, {Status: StackStatusError}},
+				})
 			}))
 			defer ts.Close()
 			c, err := New(ts.URL, secret.String("k"), ts.Client())
@@ -312,7 +315,9 @@ func TestWaitStackDeployErrorGraceRestarts(t *testing.T) {
 			time.Sleep(120 * time.Millisecond)
 			status = StackStatusActive
 		}
-		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status})
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status, DeploymentStartStatus: StackStatusError,
+			DeploymentStatus: []StackDeploymentStatus{{Status: StackStatusDeploying}, {Status: StackStatusError}},
+		})
 	}))
 	defer ts.Close()
 	c, err := New(ts.URL, secret.String("k"), ts.Client())
@@ -336,8 +341,8 @@ func TestWaitStackDeployErrorAtDeadline(t *testing.T) {
 		for _, message := range []string{"", "Last deploy failure"} {
 			t.Run(fmt.Sprintf("grace=%s/message=%s", grace, message), func(t *testing.T) {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: StackStatusError,
-						DeploymentStatus: []StackDeploymentStatus{{Message: "old message"}, {Message: message}},
+					_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: StackStatusError, DeploymentStartStatus: StackStatusError,
+						DeploymentStatus: []StackDeploymentStatus{{Status: StackStatusDeploying, Message: "Deploying"}, {Status: StackStatusError, Message: message}},
 					})
 				}))
 				defer ts.Close()
@@ -371,7 +376,7 @@ func TestWaitStackDeployErrorGraceBoundsPollAndGet(t *testing.T) {
 					}
 					return
 				}
-				_, _ = w.Write([]byte(`{"Id":7,"Status":4,"DeploymentStatus":[{"Message":"Undeploy failed"}]}`))
+				_, _ = w.Write([]byte(`{"Id":7,"Status":4,"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4,"Message":"Undeploy failed"}]}`))
 			}))
 			defer ts.Close()
 			defer close(release)
@@ -399,10 +404,12 @@ func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
 	const grace = 30 * time.Millisecond
 	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stack := Stack{ID: 7, Status: StackStatusDeploying, DeploymentStatus: []StackDeploymentStatus{{Message: "Pulling image"}}}
+		stack := Stack{ID: 7, Status: StackStatusDeploying, DeploymentStartStatus: StackStatusError,
+			DeploymentStatus: []StackDeploymentStatus{{Status: StackStatusDeploying, Message: "Deploying"}},
+		}
 		if requests.Add(1) >= 2 {
 			stack.Status = StackStatusError
-			stack.DeploymentStatus = []StackDeploymentStatus{{Message: "Image pulled"}, {Message: "Container failed: disk full"}}
+			stack.DeploymentStatus = append(stack.DeploymentStatus, StackDeploymentStatus{Status: StackStatusError, Message: "Undeploy failed: disk full"})
 		}
 		_ = json.NewEncoder(w).Encode(stack)
 	}))
@@ -413,7 +420,7 @@ func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
 	}
 	started := time.Now()
 	err = c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, grace)
-	if err == nil || !strings.Contains(err.Error(), "(Status 4): Container failed: disk full") {
+	if err == nil || !strings.Contains(err.Error(), "(Status 4): Undeploy failed: disk full") {
 		t.Fatalf("failure should include the last deployment message, got %v", err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -427,24 +434,88 @@ func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
 	}
 }
 
+func TestWaitStackDeployErrorOutsideUndeployWindow(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		fields string
+	}{
+		{name: "started_active", fields: `"DeploymentStartStatus":1,"DeploymentStatus":[{"Status":3},{"Status":4}]`},
+		{name: "started_inactive", fields: `"DeploymentStartStatus":2,"DeploymentStatus":[{"Status":3},{"Status":4}]`},
+		{name: "started_deploying", fields: `"DeploymentStartStatus":3,"DeploymentStatus":[{"Status":3},{"Status":4}]`},
+		{name: "missing_start_status", fields: `"DeploymentStatus":[{"Status":3},{"Status":4}]`},
+		{name: "zero_start_status", fields: `"DeploymentStartStatus":0,"DeploymentStatus":[{"Status":3},{"Status":4}]`},
+		{name: "deploy_finished_error", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4},{"Status":4}]`},
+		{name: "deploy_finished_active", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4},{"Status":1}]`},
+		{name: "longer_history", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4},{"Status":3},{"Status":4}]`},
+		{name: "only_error", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":4}]`},
+		{name: "missing_history", fields: `"DeploymentStartStatus":4`},
+		{name: "empty_history", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[]`},
+		{name: "reversed_history", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":4},{"Status":3}]`},
+		{name: "missing_deploying_status", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{},{"Status":4}]`},
+		{name: "zero_deploying_status", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":0},{"Status":4}]`},
+		{name: "missing_error_status", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{}]`},
+		{name: "zero_error_status", fields: `"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":0}]`},
+	} {
+		for _, duringGrace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/duringGrace=%t", tt.name, duringGrace), func(t *testing.T) {
+				var requests atomic.Int32
+				wantRequests := int32(1)
+				if duringGrace {
+					wantRequests++
+				}
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					n := requests.Add(1)
+					switch {
+					case duringGrace && n == 1:
+						_, _ = w.Write([]byte(`{"Id":7,"Status":4,"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4}]}`))
+					case n == wantRequests:
+						_, _ = fmt.Fprintf(w, `{"Id":7,"Status":4,%s}`, tt.fields)
+					default:
+						_, _ = w.Write([]byte(`{"Id":7,"Status":1}`))
+					}
+				}))
+				defer ts.Close()
+				c, err := New(ts.URL, secret.String("k"), ts.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, time.Second)
+				if err == nil || err.Error() != "portainer stack 7 deploy failed (Status 4)" {
+					t.Fatalf("Status 4 outside the failed-undeploy window must fail immediately, got %v", err)
+				}
+				if got := requests.Load(); got != wantRequests {
+					t.Fatalf("must stop polling at a genuine error: got %d requests, want %d", got, wantRequests)
+				}
+			})
+		}
+	}
+}
+
 func TestWaitStackDeployRejectsTerminalStatus(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		status  int
-		message string
+		name       string
+		status     int
+		message    string
+		omitStatus bool
 	}{
 		{name: "inactive", status: StackStatusInactive},
 		{name: "zero", status: 0},
 		{name: "zero_with_message", status: 0, message: "Missing status"},
+		{name: "missing_status", omitStatus: true},
+		{name: "missing_status_with_message", omitStatus: true, message: "Missing status"},
 		{name: "unknown", status: 99},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests atomic.Int32
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: tt.status,
-					DeploymentStatus: []StackDeploymentStatus{{Message: tt.message}},
-				})
+				response := map[string]any{
+					"Id": 7, "DeploymentStatus": []StackDeploymentStatus{{Message: tt.message}},
+				}
+				if !tt.omitStatus {
+					response["Status"] = tt.status
+				}
+				_ = json.NewEncoder(w).Encode(response)
 			}))
 			defer ts.Close()
 			c, err := New(ts.URL, secret.String("k"), ts.Client())
@@ -458,6 +529,8 @@ func TestWaitStackDeployRejectsTerminalStatus(t *testing.T) {
 			want := "portainer stack 7 deploy failed"
 			if tt.status != 0 {
 				want += fmt.Sprintf(" (Status %d)", tt.status)
+			} else {
+				want += " (no Status in response)"
 			}
 			if tt.message != "" {
 				want += ": " + tt.message
@@ -479,9 +552,11 @@ func TestWaitStackDeployTimeoutIncludesLastMessage(t *testing.T) {
 		if requests.Add(1) == 1 {
 			status = StackStatusError
 		}
-		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status, DeploymentStatus: []StackDeploymentStatus{
-			{Message: "Pulling image"}, {Message: "Waiting for container to start"},
-		}})
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status, DeploymentStartStatus: StackStatusError,
+			DeploymentStatus: []StackDeploymentStatus{
+				{Status: StackStatusDeploying, Message: "Deploying"}, {Status: StackStatusError, Message: "Waiting for container to start"},
+			},
+		})
 	}))
 	defer ts.Close()
 	c, err := New(ts.URL, secret.String("k"), ts.Client())
@@ -589,12 +664,8 @@ func TestWaitStackDeployTimeoutRetainsGetError(t *testing.T) {
 			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "Still deploying") {
 				t.Fatalf("timeout must retain last deployment message: %v", err)
 			}
-			if stall {
-				if !strings.Contains(err.Error(), "last GET error: portainer GET /stacks/7") || strings.Contains(err.Error(), "Useful upstream error") {
-					t.Fatalf("timeout must report the final stalled GET error, not the earlier 503: %v", err)
-				}
-			} else if !strings.Contains(err.Error(), "Useful upstream error") {
-				t.Fatalf("successful polls must not erase the last GET error: %v", err)
+			if !strings.Contains(err.Error(), "Useful upstream error") {
+				t.Fatalf("successful polls and deadline-canceled GETs must not erase the last GET error: %v", err)
 			}
 			if requests.Load() < 3 {
 				t.Fatalf("want polls after the upstream error, got %d", requests.Load())
@@ -661,7 +732,7 @@ func TestWaitStackDeployCancellationDuringErrorGrace(t *testing.T) {
 	polled := make(chan struct{}, 1)
 	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"Id":7,"Status":4}`))
+		_, _ = w.Write([]byte(`{"Id":7,"Status":4,"DeploymentStartStatus":4,"DeploymentStatus":[{"Status":3},{"Status":4}]}`))
 		if requests.Add(1) < 2 {
 			return
 		}
@@ -783,8 +854,8 @@ func TestWaitStackDeployTimeoutBoundsPollAndGet(t *testing.T) {
 			if ctx.Err() != nil {
 				t.Fatalf("wait exceeded its own deadline and reached caller deadline: %v", ctx.Err())
 			}
-			if slowGet && !strings.Contains(err.Error(), "last GET error: portainer GET /stacks/7") {
-				t.Fatalf("timeout must include the in-flight GET error: %v", err)
+			if strings.Contains(err.Error(), "last GET error:") {
+				t.Fatalf("deadline cancellation must not be reported as a GET failure: %v", err)
 			}
 		})
 	}

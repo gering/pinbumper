@@ -43,7 +43,7 @@ func runMain(args []string) int {
 		deployTimeout      = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
 		deployWaitTimeout  = fs.Duration("deploy-wait-timeout", portainer.DefaultDeployWaitTimeout, "how long to poll Portainer stack Status after PUT (must be >= deploy-wait-interval)")
 		deployWaitInterval = fs.Duration("deploy-wait-interval", portainer.DefaultDeployWaitInterval, "poll interval for Portainer stack Status after PUT")
-		deployErrorGrace   = fs.Duration("deploy-error-grace", portainer.DefaultDeployErrorGrace, "continuous Status 4 grace after failed undeploy: Deploy and image pulls can still use Portainer's 15m deployment context (capped by remaining deploy-wait-timeout; must be positive)")
+		deployErrorGrace   = fs.Duration("deploy-error-grace", portainer.DefaultDeployErrorGrace, "Status 4 grace only while Deploy continues after failed undeploy (DeploymentStartStatus 4, history [3,4]); other Status 4 failures are immediate; matches Portainer's 15m deployment context (capped by remaining deploy-wait-timeout; must be positive)")
 		tlsSkip            = fs.Bool("tls-skip-verify", false, "skip TLS verify for Portainer only (LAN HTTPS)")
 		skipDeploy         = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
 	)
@@ -231,9 +231,11 @@ Apply:
 
 The error grace matches Portainer's 15m deployment context and is capped by the
 remaining --deploy-wait-timeout; it never extends the overall poll deadline.
-After a failed undeploy, Status 4 can persist while Deploy pulls images; a 60s
-error grace could still abort an ongoing deploy. Status 3 resets the grace;
-Status 1 succeeds, while Status 2, 0, and unknown statuses fail immediately.
+Grace applies only while Deploy continues after a failed undeploy from Error:
+Status 4, DeploymentStartStatus 4, and exactly two history statuses [3,4].
+Other Status 4 failures are immediate. Image pulls can use the full deployment
+context, so a 60s error grace could still abort an ongoing deploy. Status 3 resets
+the grace; Status 1 succeeds, while Status 2, 0, and unknown statuses fail immediately.
 SIGINT (Ctrl-C) and SIGTERM cancel in-flight requests, deploy polling, and health waits.
 
 Environment:

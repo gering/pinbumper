@@ -49,6 +49,7 @@ const DefaultDeployErrorGrace = 15 * time.Minute
 
 // StackDeploymentStatus is an entry in a stack's deployment history.
 type StackDeploymentStatus struct {
+	Status  int    `json:"Status"`
 	Message string `json:"Message,omitempty"`
 }
 
@@ -60,14 +61,15 @@ type EnvVar struct {
 
 // Stack is a Portainer stack listing entry (secrets live in Env).
 type Stack struct {
-	ID               int                     `json:"Id"`
-	Name             string                  `json:"Name"`
-	Type             int                     `json:"Type"`
-	EndpointID       int                     `json:"EndpointId"`
-	Env              []EnvVar                `json:"Env"`
-	Status           int                     `json:"Status"`
-	DeploymentStatus []StackDeploymentStatus `json:"DeploymentStatus,omitempty"`
-	GitConfig        *struct {
+	ID                    int                     `json:"Id"`
+	Name                  string                  `json:"Name"`
+	Type                  int                     `json:"Type"`
+	EndpointID            int                     `json:"EndpointId"`
+	Env                   []EnvVar                `json:"Env"`
+	Status                int                     `json:"Status"`
+	DeploymentStartStatus int                     `json:"DeploymentStartStatus"`
+	DeploymentStatus      []StackDeploymentStatus `json:"DeploymentStatus,omitempty"`
+	GitConfig             *struct {
 		URL string `json:"URL"`
 	} `json:"GitConfig"`
 }
@@ -203,8 +205,9 @@ func (c *Client) GetStack(ctx context.Context, id int) (Stack, error) {
 }
 
 // WaitStackDeploy waits for an accepted update to become Active. Deploying keeps
-// polling; Error gets a continuous grace period. GET errors are retried until the
-// current deadline. Zero durations use defaults; timeout must be >= interval.
+// polling; Error gets grace only while Deploy continues after a failed undeploy.
+// GET errors are retried until the current deadline. Zero durations use defaults;
+// timeout must be >= interval.
 func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval, errorGrace time.Duration) error {
 	if timeout == 0 {
 		timeout = DefaultDeployWaitTimeout
@@ -232,7 +235,7 @@ func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval,
 	var message string
 	var lastStatus int
 	deployFailure := func() error {
-		detail := ""
+		detail := " (no Status in response)"
 		if lastStatus != 0 {
 			detail = fmt.Sprintf(" (Status %d)", lastStatus)
 		}
@@ -262,7 +265,7 @@ func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval,
 			return waitError()
 		}
 		stack, err := c.GetStack(pollCtx, id)
-		if err != nil {
+		if err != nil && pollCtx.Err() == nil {
 			lastErr = err
 		}
 		if pollCtx.Err() != nil {
@@ -281,10 +284,16 @@ func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval,
 				cancelGrace()
 				pollCtx = waitCtx
 			case StackStatusError:
-				// Portainer CE 2.45.3 can persist Error after a failed undeploy
-				// and still Deploy, leaving Status 4 until Deploy returns:
-				// api/http/handler/stacks/stack_update.go:426-465 and
-				// api/stacks/stackutils/stack_status.go:45-55.
+				// CE 2.45.3 prepares [Deploying], then undeploy failure from Error
+				// appends Error while Deploy still runs; Deploy appends a third entry.
+				// Successful undeploy then failed Deploy also yields [Deploying, Error];
+				// these fields cannot distinguish it from the still-running window.
+				// api/stacks/stackutils/stack_status.go:16-55 and
+				// api/http/handler/stacks/stack_update.go:426-465.
+				if stack.DeploymentStartStatus != StackStatusError || len(stack.DeploymentStatus) != 2 ||
+					stack.DeploymentStatus[0].Status != StackStatusDeploying || stack.DeploymentStatus[1].Status != StackStatusError {
+					return deployFailure()
+				}
 				if previousStatus != StackStatusError {
 					pollCtx, cancelGrace = context.WithTimeout(waitCtx, errorGrace)
 					defer cancelGrace()
