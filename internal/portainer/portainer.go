@@ -41,6 +41,12 @@ const (
 	DefaultDeployWaitInterval = 5 * time.Second
 )
 
+// DefaultDeployErrorGrace covers Portainer's 15-minute deploy context, including
+// image pulls after a failed undeploy; 60s could abort a still-running pull.
+// The remaining deploy wait timeout caps this grace period.
+// https://github.com/portainer/portainer/blob/2.45.3/api/http/handler/stacks/stack_update.go#L416
+const DefaultDeployErrorGrace = 15 * time.Minute
+
 // StackDeploymentStatus is an entry in a stack's deployment history.
 type StackDeploymentStatus struct {
 	Message string `json:"Message,omitempty"`
@@ -196,28 +202,51 @@ func (c *Client) GetStack(ctx context.Context, id int) (Stack, error) {
 	return stack, nil
 }
 
-// WaitStackDeploy waits for an accepted update to become Active. Only Deploying
-// is in progress; all other statuses fail. GET errors are retried until timeout.
-func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval time.Duration) error {
+// WaitStackDeploy waits for an accepted update to become Active. Deploying keeps
+// polling; Error gets a continuous grace period. GET errors are retried until the
+// current deadline. Zero durations use defaults; timeout must be >= interval.
+func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval, errorGrace time.Duration) error {
 	if timeout == 0 {
 		timeout = DefaultDeployWaitTimeout
 	}
 	if interval == 0 {
 		interval = DefaultDeployWaitInterval
 	}
-	if timeout < 0 || interval < 0 {
-		return fmt.Errorf("deploy wait timeout and interval must be positive")
+	if errorGrace == 0 {
+		errorGrace = DefaultDeployErrorGrace
+	}
+	if timeout < 0 || interval < 0 || errorGrace < 0 {
+		return fmt.Errorf("deploy wait timeout, interval and error grace must be positive")
+	}
+	if timeout < interval {
+		return fmt.Errorf("deploy wait timeout must be >= interval")
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	pollCtx := waitCtx
+	cancelGrace := func() {}
 	var lastErr error
 	var message string
+	var lastStatus int
+	deployFailure := func() error {
+		detail := ""
+		if lastStatus != 0 {
+			detail = fmt.Sprintf(" (Status %d)", lastStatus)
+		}
+		if message != "" {
+			detail += ": " + message
+		}
+		return fmt.Errorf("portainer stack %d deploy failed%s", id, detail)
+	}
 	waitError := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if lastStatus == StackStatusError {
+			return deployFailure()
 		}
 		detail := ""
 		if message != "" {
@@ -229,31 +258,43 @@ func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval 
 		return fmt.Errorf("timed out waiting for portainer stack %d deploy after %s%s: %w", id, timeout, detail, waitCtx.Err())
 	}
 	for {
-		if waitCtx.Err() != nil {
+		if pollCtx.Err() != nil {
 			return waitError()
 		}
-		stack, err := c.GetStack(waitCtx, id)
+		stack, err := c.GetStack(pollCtx, id)
 		if err != nil {
 			lastErr = err
 		}
-		if waitCtx.Err() != nil {
+		if pollCtx.Err() != nil {
 			return waitError()
 		}
 		if err == nil {
 			if n := len(stack.DeploymentStatus); n > 0 {
 				message = stack.DeploymentStatus[n-1].Message
 			}
+			previousStatus := lastStatus
+			lastStatus = stack.Status
 			switch stack.Status {
 			case StackStatusActive:
 				return nil
 			case StackStatusDeploying:
-				// Continue polling, even if the last deployment entry has a message.
+				cancelGrace()
+				pollCtx = waitCtx
+			case StackStatusError:
+				// Portainer CE 2.45.3 can persist Error after a failed undeploy
+				// and still Deploy, leaving Status 4 until Deploy returns:
+				// api/http/handler/stacks/stack_update.go:426-465 and
+				// api/stacks/stackutils/stack_status.go:45-55.
+				if previousStatus != StackStatusError {
+					pollCtx, cancelGrace = context.WithTimeout(waitCtx, errorGrace)
+					defer cancelGrace()
+				}
 			default:
-				return fmt.Errorf("portainer stack %d deploy failed (Status %d): %s", id, stack.Status, message)
+				return deployFailure()
 			}
 		}
 		select {
-		case <-waitCtx.Done():
+		case <-pollCtx.Done():
 			return waitError()
 		case <-ticker.C:
 		}
