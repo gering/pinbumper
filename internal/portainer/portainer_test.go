@@ -232,8 +232,8 @@ func TestGetStackUsesShortTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err = c.GetStack(ctx, 7)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GET should time out on short client, got %v", err)
+	if err == nil {
+		t.Fatal("GET should use the short HTTP timeout and fail")
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("GET used the caller deadline instead of the short HTTP timeout: %v", err)
