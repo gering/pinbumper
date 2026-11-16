@@ -56,9 +56,9 @@ func TestApplyPortainerDeployWaitBeforeHealth(t *testing.T) {
 						}
 						events = append(events, fmt.Sprintf("GET Status %d", status))
 						_ = json.NewEncoder(w).Encode(portainer.Stack{
-							ID: 3, Status: status,
+							ID: 3, Status: status, DeploymentStartStatus: portainer.StackStatusActive,
 							DeploymentStatus: []portainer.StackDeploymentStatus{
-								{Message: "old deployment message"}, {Message: failure},
+								{Status: portainer.StackStatusDeploying, Message: "Deploying"}, {Status: status, Message: failure},
 							},
 						})
 					case r.Method == http.MethodGet && r.URL.Path == "/api/endpoints/1/docker/containers/json":
@@ -125,13 +125,9 @@ func TestApplyPortainerDeployWaitBeforeHealth(t *testing.T) {
 					t.Fatalf("must not check health after deploy failure: %v", gotEvents)
 				}
 				if outcome == "error" {
-					if len(gotEvents) < 3 || gotEvents[0] != "PUT" || gotEvents[1] != "GET Status 3" {
-						t.Fatalf("must PUT then wait for deployment: %v", gotEvents)
-					}
-					for _, event := range gotEvents[2:] {
-						if event != "GET Status 4" {
-							t.Fatalf("must keep polling Status 4 during grace: %v", gotEvents)
-						}
+					want := []string{"PUT", "GET Status 3", "GET Status 4"}
+					if !reflect.DeepEqual(gotEvents, want) {
+						t.Fatalf("completed deploy error must fail immediately: got %v, want %v", gotEvents, want)
 					}
 				}
 			})
@@ -142,11 +138,12 @@ func TestApplyPortainerDeployWaitBeforeHealth(t *testing.T) {
 func TestApplyPortainerDeployErrorGrace(t *testing.T) {
 	const failure = "compose up operation failed: signal: terminated"
 	for _, tt := range []struct {
-		name     string
-		statuses []int
-		timeout  time.Duration
-		grace    time.Duration
-		wantOK   bool
+		name      string
+		statuses  []int
+		timeout   time.Duration
+		grace     time.Duration
+		wantOK    bool
+		immediate bool
 	}{
 		{
 			name: "transient error recovers",
@@ -156,12 +153,16 @@ func TestApplyPortainerDeployErrorGrace(t *testing.T) {
 			timeout: time.Second, grace: time.Second, wantOK: true,
 		},
 		{
-			name: "persistent error exhausts grace", statuses: []int{portainer.StackStatusError},
+			name: "ambiguous undeploy error exhausts grace", statuses: []int{portainer.StackStatusError},
 			timeout: time.Second, grace: 30 * time.Millisecond,
 		},
 		{
 			name: "overall timeout during error grace", statuses: []int{portainer.StackStatusError},
 			timeout: 50 * time.Millisecond, grace: time.Second,
+		},
+		{
+			name: "completed deploy error fails immediately", statuses: []int{portainer.StackStatusError},
+			timeout: time.Second, grace: time.Second, immediate: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -190,10 +191,14 @@ func TestApplyPortainerDeployErrorGrace(t *testing.T) {
 					status := tt.statuses[index]
 					gets++
 					events = append(events, fmt.Sprintf("GET Status %d", status))
+					startStatus := portainer.StackStatusError
+					if tt.immediate {
+						startStatus = portainer.StackStatusActive
+					}
 					_ = json.NewEncoder(w).Encode(portainer.Stack{
-						ID: 3, Status: status,
+						ID: 3, Status: status, DeploymentStartStatus: startStatus,
 						DeploymentStatus: []portainer.StackDeploymentStatus{
-							{Message: "old deployment message"}, {Message: failure},
+							{Status: portainer.StackStatusDeploying, Message: "Deploying"}, {Status: portainer.StackStatusError, Message: failure},
 						},
 					})
 				default:
@@ -247,6 +252,16 @@ func TestApplyPortainerDeployErrorGrace(t *testing.T) {
 				if event != "GET Status 4" {
 					t.Fatalf("must keep polling Status 4: %v", gotEvents)
 				}
+			}
+			if tt.immediate {
+				want := []string{"PUT", "GET Status 4"}
+				if !reflect.DeepEqual(gotEvents, want) {
+					t.Fatalf("genuine error must fail without grace: got %v, want %v", gotEvents, want)
+				}
+				if elapsed >= tt.grace {
+					t.Fatalf("genuine error waited for grace: %s", elapsed)
+				}
+				return
 			}
 			wait, later := tt.grace, tt.timeout
 			if tt.timeout < tt.grace {
@@ -420,7 +435,6 @@ func TestApplyPortainerStacksWaitSerially(t *testing.T) {
 			}
 			mu.Lock()
 			got := append([]string(nil), events...)
-			middleGets := gets[2]
 			mu.Unlock()
 			var want []string
 			for _, stack := range stacks {
@@ -429,12 +443,6 @@ func TestApplyPortainerStacksWaitSerially(t *testing.T) {
 					status = portainer.StackStatusError
 				}
 				want = append(want, fmt.Sprintf("PUT %d", stack.ID), fmt.Sprintf("GET %d Status 3", stack.ID), fmt.Sprintf("GET %d Status %d", stack.ID, status))
-				if stack.ID == 2 && middleFails {
-					// Repeated Error polls must all precede the next stack's PUT.
-					for poll := 2; poll < middleGets; poll++ {
-						want = append(want, "GET 2 Status 4")
-					}
-				}
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("stack updates must be serial:\ngot  %v\nwant %v", got, want)
