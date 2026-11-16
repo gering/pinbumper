@@ -71,6 +71,7 @@ type Options struct {
 	PollEvery          time.Duration
 	DeployWaitTimeout  time.Duration
 	DeployWaitInterval time.Duration
+	DeployErrorGrace   time.Duration
 	Stdout             io.Writer
 	Stderr             io.Writer
 }
@@ -110,8 +111,20 @@ func Run(ctx context.Context, opt Options) error {
 	if opt.Tags == nil {
 		return fmt.Errorf("tag lister is required")
 	}
-	if opt.DeployWaitTimeout < 0 || opt.DeployWaitInterval < 0 {
-		return fmt.Errorf("deploy wait timeout and interval must be positive")
+	if opt.DeployWaitTimeout == 0 {
+		opt.DeployWaitTimeout = portainer.DefaultDeployWaitTimeout
+	}
+	if opt.DeployWaitInterval == 0 {
+		opt.DeployWaitInterval = portainer.DefaultDeployWaitInterval
+	}
+	if opt.DeployErrorGrace == 0 {
+		opt.DeployErrorGrace = portainer.DefaultDeployErrorGrace
+	}
+	if opt.DeployWaitTimeout < 0 || opt.DeployWaitInterval < 0 || opt.DeployErrorGrace < 0 {
+		return fmt.Errorf("deploy wait timeout, interval and error grace must be positive")
+	}
+	if opt.DeployWaitTimeout < opt.DeployWaitInterval {
+		return fmt.Errorf("deploy wait timeout must be >= interval")
 	}
 	if opt.HealthTimeout == 0 {
 		opt.HealthTimeout = 10 * time.Minute
@@ -520,7 +533,7 @@ func applyDoc(ctx context.Context, opt Options, src Source, text string, group [
 		if err := opt.Portainer.UpdateStack(ctx, src.Stack, text, opt.PullImage); err != nil {
 			return err
 		}
-		if err := opt.Portainer.WaitStackDeploy(ctx, src.Stack.ID, opt.DeployWaitTimeout, opt.DeployWaitInterval); err != nil {
+		if err := opt.Portainer.WaitStackDeploy(ctx, src.Stack.ID, opt.DeployWaitTimeout, opt.DeployWaitInterval, opt.DeployErrorGrace); err != nil {
 			return err
 		}
 		fmt.Fprintf(opt.out(), "updated portainer stack %s (id %d)\n", src.Stack.Name, src.Stack.ID)

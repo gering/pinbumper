@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -232,8 +234,9 @@ func TestGetStackUsesShortTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	_, err = c.GetStack(ctx, 7)
-	if err == nil {
-		t.Fatal("GET should use the short HTTP timeout and fail")
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("GET should use the short HTTP timeout, got %v", err)
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("GET used the caller deadline instead of the short HTTP timeout: %v", err)
@@ -259,7 +262,7 @@ func TestWaitStackDeploySuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond); err != nil {
+	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := requests.Load(); got != 2 {
@@ -267,7 +270,133 @@ func TestWaitStackDeploySuccess(t *testing.T) {
 	}
 }
 
+func TestWaitStackDeployTransientError(t *testing.T) {
+	for _, statuses := range [][]int{
+		{StackStatusError, StackStatusDeploying, StackStatusActive},
+		{StackStatusError, StackStatusActive},
+	} {
+		t.Run(fmt.Sprint(statuses), func(t *testing.T) {
+			var requests atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				i := int(requests.Add(1)) - 1
+				if i >= len(statuses) {
+					i = len(statuses) - 1
+				}
+				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: statuses[i]})
+			}))
+			defer ts.Close()
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, time.Second); err != nil {
+				t.Fatalf("transient Status 4 should recover: %v", err)
+			}
+			if got := requests.Load(); int(got) != len(statuses) {
+				t.Fatalf("want %d polls, got %d", len(statuses), got)
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployErrorGraceRestarts(t *testing.T) {
+	const grace = 200 * time.Millisecond
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		status := StackStatusError
+		switch requests.Add(1) {
+		case 2:
+			time.Sleep(120 * time.Millisecond)
+			status = StackStatusDeploying
+		case 4:
+			time.Sleep(120 * time.Millisecond)
+			status = StackStatusActive
+		}
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status})
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, grace); err != nil {
+		t.Fatalf("leaving Status 4 must reset the grace: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < grace || requests.Load() != 4 {
+		t.Fatalf("must recover after total time exceeds one grace: elapsed=%s polls=%d", elapsed, requests.Load())
+	}
+}
+
+func TestWaitStackDeployErrorAtDeadline(t *testing.T) {
+	if DefaultDeployErrorGrace != 15*time.Minute {
+		t.Fatalf("default grace must cover Portainer's 15-minute context, got %s", DefaultDeployErrorGrace)
+	}
+	for _, grace := range []time.Duration{0, time.Second} {
+		for _, message := range []string{"", "Last deploy failure"} {
+			t.Run(fmt.Sprintf("grace=%s/message=%s", grace, message), func(t *testing.T) {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: StackStatusError,
+						DeploymentStatus: []StackDeploymentStatus{{Message: "old message"}, {Message: message}},
+					})
+				}))
+				defer ts.Close()
+				c, err := New(ts.URL, secret.String("k"), ts.Client())
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = c.WaitStackDeploy(context.Background(), 7, 50*time.Millisecond, time.Millisecond, grace)
+				want := "portainer stack 7 deploy failed (Status 4)"
+				if message != "" {
+					want += ": " + message
+				}
+				if err == nil || err.Error() != want {
+					t.Fatalf("Status 4 at deadline must report deployment failure, got %v, want %q", err, want)
+				}
+			})
+		}
+	}
+}
+
+func TestWaitStackDeployErrorGraceBoundsPollAndGet(t *testing.T) {
+	for _, slowGet := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slowGet=%t", slowGet), func(t *testing.T) {
+			var requests atomic.Int32
+			release := make(chan struct{})
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) > 1 && slowGet {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
+				_, _ = w.Write([]byte(`{"Id":7,"Status":4,"DeploymentStatus":[{"Message":"Undeploy failed"}]}`))
+			}))
+			defer ts.Close()
+			defer close(release)
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			interval := time.Second
+			if slowGet {
+				interval = time.Millisecond
+			}
+			started := time.Now()
+			err = c.WaitStackDeploy(context.Background(), 7, time.Second, interval, 30*time.Millisecond)
+			if err == nil || err.Error() != "portainer stack 7 deploy failed (Status 4): Undeploy failed" {
+				t.Fatalf("grace must bound polling and GET: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("grace must expire before the overall wait: %s", elapsed)
+			}
+		})
+	}
+}
+
 func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
+	const grace = 30 * time.Millisecond
 	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stack := Stack{ID: 7, Status: StackStatusDeploying, DeploymentStatus: []StackDeploymentStatus{{Message: "Pulling image"}}}
@@ -282,41 +411,59 @@ func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "Container failed: disk full") {
+	started := time.Now()
+	err = c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, grace)
+	if err == nil || !strings.Contains(err.Error(), "(Status 4): Container failed: disk full") {
 		t.Fatalf("failure should include the last deployment message, got %v", err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("terminal deployment failure must not wait for timeout: %v", err)
+		t.Fatalf("deployment failure must not wait for the overall timeout: %v", err)
 	}
-	if got := requests.Load(); got != 2 {
-		t.Fatalf("want two polls for deploying -> error, got %d", got)
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Fatalf("Status 4 failed before grace elapsed: %s < %s", elapsed, grace)
+	}
+	if got := requests.Load(); got < 3 {
+		t.Fatalf("Status 4 must keep polling during grace, got %d requests", got)
 	}
 }
 
 func TestWaitStackDeployRejectsTerminalStatus(t *testing.T) {
 	for _, tt := range []struct {
-		name   string
-		status int
+		name    string
+		status  int
+		message string
 	}{
 		{name: "inactive", status: StackStatusInactive},
 		{name: "zero", status: 0},
+		{name: "zero_with_message", status: 0, message: "Missing status"},
 		{name: "unknown", status: 99},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests atomic.Int32
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
-				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: tt.status})
+				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: tt.status,
+					DeploymentStatus: []StackDeploymentStatus{{Message: tt.message}},
+				})
 			}))
 			defer ts.Close()
 			c, err := New(ts.URL, secret.String("k"), ts.Client())
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, time.Millisecond)
+			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, time.Millisecond, 0)
 			if err == nil || errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("status %d must fail immediately, got %v", tt.status, err)
+			}
+			want := "portainer stack 7 deploy failed"
+			if tt.status != 0 {
+				want += fmt.Sprintf(" (Status %d)", tt.status)
+			}
+			if tt.message != "" {
+				want += ": " + tt.message
+			}
+			if err.Error() != want {
+				t.Fatalf("must omit empty message suffix and Status 0: got %q, want %q", err, want)
 			}
 			if got := requests.Load(); got != 1 {
 				t.Fatalf("terminal status must not be polled again, got %d requests", got)
@@ -328,8 +475,11 @@ func TestWaitStackDeployRejectsTerminalStatus(t *testing.T) {
 func TestWaitStackDeployTimeoutIncludesLastMessage(t *testing.T) {
 	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: StackStatusDeploying, DeploymentStatus: []StackDeploymentStatus{
+		status := StackStatusDeploying
+		if requests.Add(1) == 1 {
+			status = StackStatusError
+		}
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status, DeploymentStatus: []StackDeploymentStatus{
 			{Message: "Pulling image"}, {Message: "Waiting for container to start"},
 		}})
 	}))
@@ -338,7 +488,7 @@ func TestWaitStackDeployTimeoutIncludesLastMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.WaitStackDeploy(context.Background(), 7, 50*time.Millisecond, time.Millisecond)
+	err = c.WaitStackDeploy(context.Background(), 7, 50*time.Millisecond, time.Millisecond, 0)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout must wrap context.DeadlineExceeded, got %v", err)
 	}
@@ -369,7 +519,7 @@ func TestWaitStackDeployRetriesGetErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond); err != nil {
+	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond, 0); err != nil {
 		t.Fatalf("transient GET errors should be retried, got %v", err)
 	}
 	if got := requests.Load(); got != 4 {
@@ -391,7 +541,7 @@ func TestWaitStackDeployGetErrorsTimeoutIncludesLastError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond)
+	err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond, 0)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("GET failures should be retried until timeout, got %v", err)
 	}
@@ -435,7 +585,7 @@ func TestWaitStackDeployTimeoutRetainsGetError(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond)
+			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond, 0)
 			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "Still deploying") {
 				t.Fatalf("timeout must retain last deployment message: %v", err)
 			}
@@ -482,7 +632,7 @@ func TestWaitStackDeployCancellation(t *testing.T) {
 			}
 			result := make(chan error, 1)
 			go func() {
-				result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, 100*time.Millisecond)
+				result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, 100*time.Millisecond, 0)
 			}()
 			if !alreadyCanceled {
 				select {
@@ -504,6 +654,46 @@ func TestWaitStackDeployCancellation(t *testing.T) {
 				t.Fatalf("canceled context must not send GET requests, got %d", requests.Load())
 			}
 		})
+	}
+}
+
+func TestWaitStackDeployCancellationDuringErrorGrace(t *testing.T) {
+	polled := make(chan struct{}, 1)
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":7,"Status":4}`))
+		if requests.Add(1) < 2 {
+			return
+		}
+		select {
+		case polled <- struct{}{}:
+		default:
+		}
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- c.WaitStackDeploy(ctx, 7, time.Second, time.Millisecond, time.Second)
+	}()
+	select {
+	case <-polled:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("no Status 4 poll received")
+	}
+	select {
+	case err := <-result:
+		if err != context.Canceled {
+			t.Fatalf("cancellation during grace must return ctx.Err(), got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("error grace did not stop after cancellation")
 	}
 }
 
@@ -535,7 +725,7 @@ func TestWaitStackDeployCancellationAbortsInFlightGet(t *testing.T) {
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, time.Millisecond)
+		result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, time.Millisecond, 0)
 	}()
 	select {
 	case <-started:
@@ -560,7 +750,7 @@ func TestWaitStackDeployCancellationAbortsInFlightGet(t *testing.T) {
 
 func TestWaitStackDeployTimeoutBoundsPollAndGet(t *testing.T) {
 	for _, slowGet := range []bool{false, true} {
-		name := "long_poll_interval"
+		name := "longest_valid_poll_interval"
 		if slowGet {
 			name = "in_flight_get"
 		}
@@ -583,10 +773,10 @@ func TestWaitStackDeployTimeoutBoundsPollAndGet(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The request and the interval must both be bounded by the wait,
-			// even when the HTTP client has no timeout and the interval is huge.
+			// even when the HTTP client has no timeout.
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			err = c.WaitStackDeploy(ctx, 7, 50*time.Millisecond, time.Hour)
+			err = c.WaitStackDeploy(ctx, 7, 50*time.Millisecond, 50*time.Millisecond, 0)
 			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out waiting") {
 				t.Fatalf("want deploy wait timeout, got %v", err)
 			}
@@ -608,7 +798,7 @@ func TestWaitStackDeployZeroDurationsUseDefaults(t *testing.T) {
 	}{
 		{name: "both_zero"},
 		{name: "zero_timeout", interval: time.Millisecond},
-		{name: "zero_interval", timeout: time.Second},
+		{name: "zero_interval", timeout: 10 * time.Second},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -621,22 +811,27 @@ func TestWaitStackDeployZeroDurationsUseDefaults(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval); err != nil {
+			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval, 0); err != nil {
 				t.Fatalf("zero durations should use defaults and poll immediately, got %v", err)
 			}
 		})
 	}
 }
 
-func TestWaitStackDeployRejectsNegativeDurations(t *testing.T) {
+func TestWaitStackDeployRejectsInvalidDurations(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		timeout  time.Duration
-		interval time.Duration
+		name       string
+		timeout    time.Duration
+		interval   time.Duration
+		errorGrace time.Duration
 	}{
 		{name: "negative_timeout", timeout: -time.Millisecond, interval: time.Millisecond},
 		{name: "negative_interval", timeout: time.Second, interval: -time.Millisecond},
+		{name: "negative_grace", errorGrace: -time.Millisecond},
 		{name: "both_negative", timeout: -time.Millisecond, interval: -time.Millisecond},
+		{name: "timeout_below_interval", timeout: time.Millisecond, interval: 2 * time.Millisecond},
+		{name: "timeout_below_default_interval", timeout: time.Millisecond},
+		{name: "default_timeout_below_interval", interval: time.Hour},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var requests atomic.Int32
@@ -651,10 +846,10 @@ func TestWaitStackDeployRejectsNegativeDurations(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval); err == nil {
-				t.Fatal("negative durations must return an error")
+			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval, tt.errorGrace); err == nil {
+				t.Fatal("invalid durations must return an error")
 			} else if errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("negative durations should fail validation, not time out: %v", err)
+				t.Fatalf("invalid durations should fail validation, not time out: %v", err)
 			}
 			if got := requests.Load(); got != 0 {
 				t.Fatalf("invalid durations must not send GET requests, got %d", got)

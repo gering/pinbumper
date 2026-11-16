@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+
+	"github.com/gering/pinbumper/internal/portainer"
 )
 
 func clearKeyEnv(t *testing.T) {
@@ -125,13 +129,22 @@ func TestUsageMentionsPlanAndApply(t *testing.T) {
 	if !strings.Contains(text, "deploy-timeout") || !strings.Contains(text, "skip-deploy") {
 		t.Fatal("usage must document deploy-timeout and skip-deploy")
 	}
-	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval"} {
+	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval", "--deploy-error-grace"} {
 		if !strings.Contains(text, flag) {
 			t.Fatalf("usage must document %s", flag)
 		}
 	}
-	if !strings.Contains(text, "default 20m") || !strings.Contains(text, "default 5s") {
-		t.Fatal("usage must document deploy wait defaults")
+	if !strings.Contains(text, "default 20m") || !strings.Contains(text, "default 5s") || !strings.Contains(text, "default 15m") {
+		t.Fatal("usage must document deploy wait and error grace defaults")
+	}
+	if !strings.Contains(text, "must be >= interval") {
+		t.Fatal("usage must document that the deploy wait timeout cannot be shorter than the interval")
+	}
+	if !strings.Contains(text, "Portainer's 15m deployment context") || !strings.Contains(text, "capped by the\nremaining --deploy-wait-timeout") {
+		t.Fatal("usage must explain the error grace default and remaining timeout cap")
+	}
+	if !strings.Contains(text, "SIGINT") || !strings.Contains(text, "SIGTERM") || !strings.Contains(text, "cancel") {
+		t.Fatal("usage must document cancellation on SIGINT and SIGTERM")
 	}
 	if strings.Contains(text, "PINBUMPER_") {
 		t.Fatal("usage must not mention PINBUMPER_* env vars")
@@ -150,23 +163,82 @@ func TestNoArgsIsApplyNotHelp(t *testing.T) {
 	}
 }
 
-func TestDeployWaitFlags(t *testing.T) {
+func TestDeployFlags(t *testing.T) {
 	t.Setenv("PORTAINER_URL", "")
 	path := filepath.Join(t.TempDir(), "compose.yml")
 	if err := os.WriteFile(path, []byte("services:\n  app:\n    image: example/app:1.0.0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval"} {
+	for _, flag := range []string{"--deploy-wait-timeout", "--deploy-wait-interval", "--deploy-error-grace"} {
 		for _, value := range []string{"0s", "-1s", "not-a-duration"} {
 			t.Run(flag+"="+value, func(t *testing.T) {
 				if code := runMain([]string{"plan", "--compose-file", path, flag + "=" + value}); code != 2 {
-					t.Fatalf("invalid deploy wait: exit %d, want 2", code)
+					t.Fatalf("invalid deploy flags: exit %d, want 2", code)
 				}
 			})
 		}
 	}
-	if code := runMain([]string{"plan", "--compose-file", path, "--deploy-wait-timeout=50ms", "--deploy-wait-interval=1ms"}); code != 0 {
-		t.Fatalf("valid deploy wait flags: exit %d, want 0", code)
+	for _, flags := range [][]string{
+		{"--deploy-wait-timeout=1ms", "--deploy-wait-interval=2ms"},
+		{"--deploy-wait-timeout=1ms"}, // Shorter than the default interval.
+	} {
+		if code := runMain(append([]string{"plan", "--compose-file", path}, flags...)); code != 2 {
+			t.Fatalf("timeout shorter than interval (%v): exit %d, want 2", flags, code)
+		}
+	}
+	for _, flags := range [][]string{
+		nil, // Defaults must be valid together.
+		{"--deploy-wait-timeout=50ms", "--deploy-wait-interval=1ms"},
+		{"--deploy-wait-timeout=1ms", "--deploy-wait-interval=1ms"},
+		{"--deploy-error-grace=1ms"},
+		{"--deploy-wait-timeout=50ms", "--deploy-wait-interval=1ms", "--deploy-error-grace=1h"}, // Capped at runtime, not rejected.
+	} {
+		if code := runMain(append([]string{"plan", "--compose-file", path}, flags...)); code != 0 {
+			t.Fatalf("valid deploy flags (%v): exit %d, want 0", flags, code)
+		}
+	}
+}
+
+func TestDeployFlagHelpDefaults(t *testing.T) {
+	out, err := os.CreateTemp(t.TempDir(), "help")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := out.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	stderr := os.Stderr
+	os.Stderr = out
+	defer func() { os.Stderr = stderr }()
+
+	if code := runMain([]string{"apply", "--help"}); code != 2 {
+		t.Fatalf("flag help: exit %d, want 2", code)
+	}
+	b, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	for _, want := range []string{
+		"-deploy-error-grace duration",
+		fmt.Sprintf("(default %s)", portainer.DefaultDeployErrorGrace),
+		fmt.Sprintf("(default %s)", portainer.DefaultDeployWaitTimeout),
+		fmt.Sprintf("(default %s)", portainer.DefaultDeployWaitInterval),
+		"Portainer's 15m deployment context",
+		"capped by remaining deploy-wait-timeout",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("flag help must contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestShutdownSignals(t *testing.T) {
+	signals := shutdownSignals()
+	if len(signals) != 2 || signals[0] != os.Interrupt || signals[1] != syscall.SIGTERM {
+		t.Fatalf("shutdown signals = %v, want SIGINT and SIGTERM", signals)
 	}
 }
 

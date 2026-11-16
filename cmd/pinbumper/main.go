@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gering/pinbumper/internal/portainer"
@@ -40,8 +41,9 @@ func runMain(args []string) int {
 		healthTimeout      = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
 		httpTimeout        = fs.Duration("http-timeout", 60*time.Second, "HTTP timeout for tag listing and Portainer GET")
 		deployTimeout      = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
-		deployWaitTimeout  = fs.Duration("deploy-wait-timeout", portainer.DefaultDeployWaitTimeout, "how long to poll Portainer stack Status after PUT")
+		deployWaitTimeout  = fs.Duration("deploy-wait-timeout", portainer.DefaultDeployWaitTimeout, "how long to poll Portainer stack Status after PUT (must be >= deploy-wait-interval)")
 		deployWaitInterval = fs.Duration("deploy-wait-interval", portainer.DefaultDeployWaitInterval, "poll interval for Portainer stack Status after PUT")
+		deployErrorGrace   = fs.Duration("deploy-error-grace", portainer.DefaultDeployErrorGrace, "continuous Status 4 grace after failed undeploy: Deploy and image pulls can still use Portainer's 15m deployment context (capped by remaining deploy-wait-timeout; must be positive)")
 		tlsSkip            = fs.Bool("tls-skip-verify", false, "skip TLS verify for Portainer only (LAN HTTPS)")
 		skipDeploy         = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
 	)
@@ -51,8 +53,12 @@ func runMain(args []string) int {
 		return 2
 	}
 
-	if *deployWaitTimeout <= 0 || *deployWaitInterval <= 0 {
-		fmt.Fprintln(os.Stderr, "--deploy-wait-timeout and --deploy-wait-interval must be positive")
+	if *deployWaitTimeout <= 0 || *deployWaitInterval <= 0 || *deployErrorGrace <= 0 {
+		fmt.Fprintln(os.Stderr, "--deploy-wait-timeout, --deploy-wait-interval, and --deploy-error-grace must be positive")
+		return 2
+	}
+	if *deployWaitTimeout < *deployWaitInterval {
+		fmt.Fprintln(os.Stderr, "--deploy-wait-timeout must be >= --deploy-wait-interval")
 		return 2
 	}
 
@@ -79,6 +85,7 @@ func runMain(args []string) int {
 		HealthTimeout:      *healthTimeout,
 		DeployWaitTimeout:  *deployWaitTimeout,
 		DeployWaitInterval: *deployWaitInterval,
+		DeployErrorGrace:   *deployErrorGrace,
 		Stdout:             os.Stdout,
 		Stderr:             os.Stderr,
 	}
@@ -111,13 +118,17 @@ func runMain(args []string) int {
 		opt.Portainer = pc
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer stop()
 	if err := run.Run(ctx, opt); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func shutdownSignals() []os.Signal {
+	return []os.Signal{os.Interrupt, syscall.SIGTERM}
 }
 
 // splitCommand defaults to apply when no subcommand is given (including
@@ -213,9 +224,17 @@ Apply:
   --skip-deploy                    Rewrite local files only; no compose up, no Portainer PUT
   --http-timeout DURATION          Tag listing / Portainer GET (default 60s)
   --deploy-timeout DURATION        HTTP timeout for Portainer PUT (default 30m; 0 = none)
-  --deploy-wait-timeout DURATION   Poll deadline after Portainer PUT (default 20m; must be positive)
+  --deploy-wait-timeout DURATION   Poll deadline after Portainer PUT (default 20m; must be >= interval)
   --deploy-wait-interval DURATION  Stack Status poll interval (default 5s; must be positive)
+  --deploy-error-grace DURATION    Transient deploy-error grace (default 15m; must be positive)
   --tls-skip-verify                Skip TLS verify for Portainer only (LAN HTTPS)
+
+The error grace matches Portainer's 15m deployment context and is capped by the
+remaining --deploy-wait-timeout; it never extends the overall poll deadline.
+After a failed undeploy, Status 4 can persist while Deploy pulls images; a 60s
+error grace could still abort an ongoing deploy. Status 3 resets the grace;
+Status 1 succeeds, while Status 2, 0, and unknown statuses fail immediately.
+SIGINT (Ctrl-C) and SIGTERM cancel in-flight requests, deploy polling, and health waits.
 
 Environment:
   PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
