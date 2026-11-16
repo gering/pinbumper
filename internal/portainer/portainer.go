@@ -25,6 +25,27 @@ const (
 	TypeK8s     = 3
 )
 
+// Stack Status values and DeploymentStatus[].Message are documented in:
+// https://github.com/portainer/portainer/blob/2.45.3/api/portainer.go
+// Polling completion (not PUT acceptance) follows the official FAQ:
+// https://docs.portainer.io/faqs/troubleshooting/stacks-deployments-and-updates/why-did-my-api-client-start-getting-409-errors-after-upgrading
+const (
+	StackStatusActive    = 1
+	StackStatusInactive  = 2
+	StackStatusDeploying = 3
+	StackStatusError     = 4
+)
+
+const (
+	DefaultDeployWaitTimeout  = 20 * time.Minute
+	DefaultDeployWaitInterval = 5 * time.Second
+)
+
+// StackDeploymentStatus is an entry in a stack's deployment history.
+type StackDeploymentStatus struct {
+	Message string `json:"Message,omitempty"`
+}
+
 // EnvVar is a Portainer stack environment entry.
 type EnvVar struct {
 	Name  string `json:"name"`
@@ -33,12 +54,14 @@ type EnvVar struct {
 
 // Stack is a Portainer stack listing entry (secrets live in Env).
 type Stack struct {
-	ID         int      `json:"Id"`
-	Name       string   `json:"Name"`
-	Type       int      `json:"Type"`
-	EndpointID int      `json:"EndpointId"`
-	Env        []EnvVar `json:"Env"`
-	GitConfig  *struct {
+	ID               int                     `json:"Id"`
+	Name             string                  `json:"Name"`
+	Type             int                     `json:"Type"`
+	EndpointID       int                     `json:"EndpointId"`
+	Env              []EnvVar                `json:"Env"`
+	Status           int                     `json:"Status"`
+	DeploymentStatus []StackDeploymentStatus `json:"DeploymentStatus,omitempty"`
+	GitConfig        *struct {
 		URL string `json:"URL"`
 	} `json:"GitConfig"`
 }
@@ -164,6 +187,79 @@ func (c *Client) ListStacks(ctx context.Context) ([]Stack, error) {
 	return stacks, nil
 }
 
+// GetStack reads deployment status using the short HTTP client.
+func (c *Client) GetStack(ctx context.Context, id int) (Stack, error) {
+	var stack Stack
+	if err := c.get(ctx, fmt.Sprintf("/stacks/%d", id), &stack); err != nil {
+		return Stack{}, err
+	}
+	return stack, nil
+}
+
+// WaitStackDeploy waits for an accepted update to become Active. Only Deploying
+// is in progress; all other statuses fail. GET errors are retried until timeout.
+func (c *Client) WaitStackDeploy(ctx context.Context, id int, timeout, interval time.Duration) error {
+	if timeout == 0 {
+		timeout = DefaultDeployWaitTimeout
+	}
+	if interval == 0 {
+		interval = DefaultDeployWaitInterval
+	}
+	if timeout < 0 || interval < 0 {
+		return fmt.Errorf("deploy wait timeout and interval must be positive")
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var lastErr error
+	var message string
+	waitError := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		detail := ""
+		if message != "" {
+			detail += ": " + message
+		}
+		if lastErr != nil {
+			detail += "; last GET error: " + lastErr.Error()
+		}
+		return fmt.Errorf("timed out waiting for portainer stack %d deploy after %s%s: %w", id, timeout, detail, waitCtx.Err())
+	}
+	for {
+		if waitCtx.Err() != nil {
+			return waitError()
+		}
+		stack, err := c.GetStack(waitCtx, id)
+		if err != nil {
+			lastErr = err
+		}
+		if waitCtx.Err() != nil {
+			return waitError()
+		}
+		if err == nil {
+			if n := len(stack.DeploymentStatus); n > 0 {
+				message = stack.DeploymentStatus[n-1].Message
+			}
+			switch stack.Status {
+			case StackStatusActive:
+				return nil
+			case StackStatusDeploying:
+				// Continue polling, even if the last deployment entry has a message.
+			default:
+				return fmt.Errorf("portainer stack %d deploy failed (Status %d): %s", id, stack.Status, message)
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitError()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (c *Client) StackFile(ctx context.Context, id int) (string, error) {
 	var fc FileContent
 	if err := c.get(ctx, fmt.Sprintf("/stacks/%d/file", id), &fc); err != nil {
@@ -173,6 +269,7 @@ func (c *Client) StackFile(ctx context.Context, id int) (string, error) {
 }
 
 // UpdateStack PUTs the compose file. env is sent as-is (nil becomes []).
+// Success means accepted; call WaitStackDeploy before updating the next stack.
 func (c *Client) UpdateStack(ctx context.Context, stack Stack, compose string, pullImage bool) error {
 	env := stack.Env
 	if env == nil {

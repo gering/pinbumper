@@ -132,7 +132,13 @@ pinbumper apply --portainer-url http://portainer:9000 --api-key-file ./portainer
 
 Use the LAN HTTP URL when you can. Putting Portainer behind Cloudflare (or another proxy that buffers long requests) can hang stack updates.
 
-`--http-timeout` (default 60s) applies to **tag listing** and Portainer GET. Portainer `PUT` (pull + redeploy) uses `--deploy-timeout` (default 30m, `0` disables the client deadline). A 60s abort mid-PUT can leave the stack half-applied; there is no rollback.
+`--http-timeout` (default 60s) applies to **tag listing** and Portainer GET. The Portainer `PUT` HTTP request uses `--deploy-timeout` (default 30m, `0` disables the client deadline). A 60s abort mid-PUT can leave the stack half-applied; there is no rollback.
+
+Since Portainer 2.41, a successful `PUT /api/stacks/{id}` means **accepted**, not deployed. After each PUT, pinbumper polls `GET /api/stacks/{id}` using the short GET client, even without a Compose healthcheck. The integer `Status` field (also present on list entries) is **1 Active**, **2 Inactive**, **3 Deploying**, **4 Error**. Only 3 keeps polling; 1 logs `updated portainer stack …` and allows health checks to start. Status 4, 2, or any other non-3/non-1 status fails the apply. Failure text comes from the **last** `DeploymentStatus[].Message` entry when present.
+
+`--deploy-wait-timeout` bounds this post-PUT wait (default **20m**); `--deploy-wait-interval` controls polling (default **5s**). Both must be positive and are independent of `--deploy-timeout` and `--health-timeout`. Transient GET errors are retried until the wait deadline; on timeout the error includes the last GET error and last known deployment message when available. Cancellation aborts the wait. A failed or timed-out deployment skips health checks, logs an error without `updated`, and continues to remaining stacks; the run exits non-zero. Stack updates are serial: the next stack's PUT cannot begin before this wait (and any subsequent health wait) finishes.
+
+These fields and polling rules are documented by the official [Portainer async-update FAQ](https://docs.portainer.io/faqs/troubleshooting/stacks-deployments-and-updates/why-did-my-api-client-start-getting-409-errors-after-upgrading) and the [Portainer CE 2.45.3 `api/portainer.go` source](https://github.com/portainer/portainer/blob/2.45.3/api/portainer.go) (`Stack.Status`, `Stack.DeploymentStatus`, `StackDeploymentStatus.Message`, and the `StackStatus*` constants).
 
 `--tls-skip-verify` applies to **Portainer only** (LAN HTTPS). Docker Hub / GHCR keep TLS verification.
 
@@ -193,8 +199,8 @@ pinbumper always reads the stack, then sends that same `Env` array back unchange
 4. **Rewrite** only the image tag in the original YAML (comments and key order stay). Follow does **not** rewrite the image line.
 5. **Deploy**
    - Local: `docker compose -f FILE up -d --pull always --no-deps <changed services>` (or `--skip-deploy` to only write the file).
-   - Portainer: `PUT` the stack with the compose (updated pin, or the **same** file for follow) + existing `Env`, `PullImage` true.
-6. **Health** — if the service has a Compose `healthcheck`, wait until `healthy` (default 10m, `--health-timeout`). If the container exits or goes `unhealthy`, apply fails with a **non-zero exit**. pinbumper does **not** roll the pin or the stack back.
+   - Portainer: `PUT` the stack with the compose (updated pin, or the **same** file for follow) + existing `Env`, `PullImage` true. Then **wait for deploy completion** via GET stack `Status` (3 → keep polling; 1 → success; any other status → failure), bounded by `--deploy-wait-timeout` (20m), polling every `--deploy-wait-interval` (5s). This happens with or without a healthcheck, before the next stack's PUT. Failures include the last `DeploymentStatus[].Message` when present, skip health, and continue with the next stack; the run exits non-zero.
+6. **Health** — after deploy success (Portainer Status 1), if the service has a Compose `healthcheck`, wait until `healthy` (default 10m, `--health-timeout`, separate from deploy wait). If the container exits or goes `unhealthy`, apply fails with a **non-zero exit**. pinbumper does **not** roll the pin or the stack back.
 
 ## Install
 

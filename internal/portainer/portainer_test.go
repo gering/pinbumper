@@ -3,10 +3,12 @@ package portainer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,6 +175,491 @@ func TestListStacksUsesShortTimeout(t *testing.T) {
 	_, err = c.ListStacks(context.Background())
 	if err == nil {
 		t.Fatal("GET list should use the short HTTP timeout and fail")
+	}
+}
+
+func TestGetStack(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/stacks/7" {
+			t.Errorf("request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("X-API-Key") != "test-key" {
+			t.Error("missing API key")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"Id":7,"Name":"paperless","Type":2,"EndpointId":3,"Status":3,"Env":[{"name":"TZ","value":"UTC"}],"DeploymentStatus":[{"Message":"Pulling image"},{"Message":"Starting containers"}]}`))
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("test-key"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack, err := c.GetStack(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.ID != 7 || stack.Name != "paperless" || stack.Type != TypeCompose || stack.EndpointID != 3 || stack.Status != StackStatusDeploying {
+		t.Fatalf("stack: %+v", stack)
+	}
+	if len(stack.Env) != 1 || stack.Env[0].Name != "TZ" || stack.Env[0].Value != "UTC" {
+		t.Fatalf("env: %+v", stack.Env)
+	}
+	if len(stack.DeploymentStatus) != 2 || stack.DeploymentStatus[0].Message != "Pulling image" || stack.DeploymentStatus[1].Message != "Starting containers" {
+		t.Fatalf("deployment status: %+v", stack.DeploymentStatus)
+	}
+}
+
+func TestGetStackUsesShortTimeout(t *testing.T) {
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+			_, _ = w.Write([]byte(`{"Id":7,"Status":1}`))
+		}
+	}))
+	defer ts.Close()
+	defer close(release)
+	short := &http.Client{Timeout: 20 * time.Millisecond, Transport: ts.Client().Transport}
+	c, err := New(ts.URL, secret.String("k"), short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.MutateHTTP = &http.Client{Timeout: time.Second, Transport: ts.Client().Transport}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err = c.GetStack(ctx, 7)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GET should time out on short client, got %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("GET used the caller deadline instead of the short HTTP timeout: %v", err)
+	}
+}
+
+func TestWaitStackDeploySuccess(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/stacks/7" {
+			t.Errorf("request: %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+			return
+		}
+		status := StackStatusDeploying
+		if requests.Add(1) >= 2 {
+			status = StackStatusActive
+		}
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: status})
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("want two polls for deploying -> active, got %d", got)
+	}
+}
+
+func TestWaitStackDeployFailureIncludesLastMessage(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stack := Stack{ID: 7, Status: StackStatusDeploying, DeploymentStatus: []StackDeploymentStatus{{Message: "Pulling image"}}}
+		if requests.Add(1) >= 2 {
+			stack.Status = StackStatusError
+			stack.DeploymentStatus = []StackDeploymentStatus{{Message: "Image pulled"}, {Message: "Container failed: disk full"}}
+		}
+		_ = json.NewEncoder(w).Encode(stack)
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "Container failed: disk full") {
+		t.Fatalf("failure should include the last deployment message, got %v", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("terminal deployment failure must not wait for timeout: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("want two polls for deploying -> error, got %d", got)
+	}
+}
+
+func TestWaitStackDeployRejectsTerminalStatus(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "inactive", status: StackStatusInactive},
+		{name: "zero", status: 0},
+		{name: "unknown", status: 99},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: tt.status})
+			}))
+			defer ts.Close()
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, time.Millisecond)
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("status %d must fail immediately, got %v", tt.status, err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("terminal status must not be polled again, got %d requests", got)
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployTimeoutIncludesLastMessage(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_ = json.NewEncoder(w).Encode(Stack{ID: 7, Status: StackStatusDeploying, DeploymentStatus: []StackDeploymentStatus{
+			{Message: "Pulling image"}, {Message: "Waiting for container to start"},
+		}})
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.WaitStackDeploy(context.Background(), 7, 50*time.Millisecond, time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout must wrap context.DeadlineExceeded, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Waiting for container to start") {
+		t.Fatalf("timeout should include the last deployment message, got %v", err)
+	}
+	if got := requests.Load(); got < 2 {
+		t.Fatalf("deploying status should be polled until timeout, got %d requests", got)
+	}
+}
+
+func TestWaitStackDeployRetriesGetErrors(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			http.Error(w, `{"message":"Portainer restarting"}`, http.StatusServiceUnavailable)
+		case 2:
+			_, _ = w.Write([]byte(`{"Id":7,"Status":3}`))
+		case 3:
+			_, _ = w.Write([]byte(`not valid JSON`))
+		default:
+			_, _ = w.Write([]byte(`{"Id":7,"Status":1}`))
+		}
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WaitStackDeploy(context.Background(), 7, time.Second, time.Millisecond); err != nil {
+		t.Fatalf("transient GET errors should be retried, got %v", err)
+	}
+	if got := requests.Load(); got != 4 {
+		t.Fatalf("want four polls including both GET errors, got %d", got)
+	}
+}
+
+func TestWaitStackDeployGetErrorsTimeoutIncludesLastError(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, `{"message":"Initial GET failure"}`, http.StatusBadGateway)
+			return
+		}
+		http.Error(w, `{"message":"Latest GET failure"}`, http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GET failures should be retried until timeout, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Latest GET failure") {
+		t.Fatalf("timeout should include the last GET error, got %v", err)
+	}
+	if got := requests.Load(); got < 2 {
+		t.Fatalf("GET errors should be retried, got %d requests", got)
+	}
+}
+
+func TestWaitStackDeployTimeoutRetainsGetError(t *testing.T) {
+	for _, stall := range []bool{false, true} {
+		name := "successful_polls_after_error"
+		if stall {
+			name = "stalled_get_after_error"
+		}
+		t.Run(name, func(t *testing.T) {
+			var requests atomic.Int32
+			release := make(chan struct{})
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch requests.Add(1) {
+				case 1:
+					_, _ = w.Write([]byte(`{"Id":7,"Status":3,"DeploymentStatus":[{"Message":"Still deploying"}]}`))
+				case 2:
+					http.Error(w, `{"message":"Useful upstream error"}`, http.StatusServiceUnavailable)
+				default:
+					if stall {
+						select {
+						case <-r.Context().Done():
+						case <-release:
+						}
+						return
+					}
+					_, _ = w.Write([]byte(`{"Id":7,"Status":3}`))
+				}
+			}))
+			defer ts.Close()
+			defer close(release)
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.WaitStackDeploy(context.Background(), 7, 100*time.Millisecond, 30*time.Millisecond)
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "Still deploying") {
+				t.Fatalf("timeout must retain last deployment message: %v", err)
+			}
+			if stall {
+				if !strings.Contains(err.Error(), "last GET error: portainer GET /stacks/7") || strings.Contains(err.Error(), "Useful upstream error") {
+					t.Fatalf("timeout must report the final stalled GET error, not the earlier 503: %v", err)
+				}
+			} else if !strings.Contains(err.Error(), "Useful upstream error") {
+				t.Fatalf("successful polls must not erase the last GET error: %v", err)
+			}
+			if requests.Load() < 3 {
+				t.Fatalf("want polls after the upstream error, got %d", requests.Load())
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployCancellation(t *testing.T) {
+	for _, alreadyCanceled := range []bool{true, false} {
+		name := "while_polling"
+		if alreadyCanceled {
+			name = "before_polling"
+		}
+		t.Run(name, func(t *testing.T) {
+			polled := make(chan struct{}, 1)
+			var requests atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_, _ = w.Write([]byte(`{"Id":7,"Status":3}`))
+				select {
+				case polled <- struct{}{}:
+				default:
+				}
+			}))
+			defer ts.Close()
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if alreadyCanceled {
+				cancel()
+			}
+			result := make(chan error, 1)
+			go func() {
+				result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, 100*time.Millisecond)
+			}()
+			if !alreadyCanceled {
+				select {
+				case <-polled:
+					cancel()
+				case <-time.After(time.Second):
+					t.Fatal("no deployment poll received")
+				}
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancellation must abort deployment wait, got %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("deployment wait did not stop after cancellation")
+			}
+			if alreadyCanceled && requests.Load() != 0 {
+				t.Fatalf("canceled context must not send GET requests, got %d", requests.Load())
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployCancellationAbortsInFlightGet(t *testing.T) {
+	started := make(chan struct{}, 1)
+	aborted := make(chan struct{}, 1)
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+			select {
+			case aborted <- struct{}{}:
+			default:
+			}
+		case <-release:
+		}
+	}))
+	defer ts.Close()
+	defer close(release)
+	c, err := New(ts.URL, secret.String("k"), ts.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- c.WaitStackDeploy(ctx, 7, 500*time.Millisecond, time.Millisecond)
+	}()
+	select {
+	case <-started:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("GET did not start")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("in-flight cancellation must abort deployment wait, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deployment wait did not abort the in-flight GET")
+	}
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		t.Fatal("GET request context was not canceled")
+	}
+}
+
+func TestWaitStackDeployTimeoutBoundsPollAndGet(t *testing.T) {
+	for _, slowGet := range []bool{false, true} {
+		name := "long_poll_interval"
+		if slowGet {
+			name = "in_flight_get"
+		}
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if slowGet {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
+				_, _ = w.Write([]byte(`{"Id":7,"Status":3}`))
+			}))
+			defer ts.Close()
+			defer close(release)
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The request and the interval must both be bounded by the wait,
+			// even when the HTTP client has no timeout and the interval is huge.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = c.WaitStackDeploy(ctx, 7, 50*time.Millisecond, time.Hour)
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out waiting") {
+				t.Fatalf("want deploy wait timeout, got %v", err)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("wait exceeded its own deadline and reached caller deadline: %v", ctx.Err())
+			}
+			if slowGet && !strings.Contains(err.Error(), "last GET error: portainer GET /stacks/7") {
+				t.Fatalf("timeout must include the in-flight GET error: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployZeroDurationsUseDefaults(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		timeout  time.Duration
+		interval time.Duration
+	}{
+		{name: "both_zero"},
+		{name: "zero_timeout", interval: time.Millisecond},
+		{name: "zero_interval", timeout: time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"Id":7,"Status":1}`))
+			}))
+			defer ts.Close()
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval); err != nil {
+				t.Fatalf("zero durations should use defaults and poll immediately, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitStackDeployRejectsNegativeDurations(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		timeout  time.Duration
+		interval time.Duration
+	}{
+		{name: "negative_timeout", timeout: -time.Millisecond, interval: time.Millisecond},
+		{name: "negative_interval", timeout: time.Second, interval: -time.Millisecond},
+		{name: "both_negative", timeout: -time.Millisecond, interval: -time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				_, _ = w.Write([]byte(`{"Id":7,"Status":1}`))
+			}))
+			defer ts.Close()
+			c, err := New(ts.URL, secret.String("k"), ts.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := c.WaitStackDeploy(ctx, 7, tt.timeout, tt.interval); err == nil {
+				t.Fatal("negative durations must return an error")
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("negative durations should fail validation, not time out: %v", err)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("invalid durations must not send GET requests, got %d", got)
+			}
+		})
 	}
 }
 

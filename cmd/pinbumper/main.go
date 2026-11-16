@@ -33,19 +33,26 @@ func runMain(args []string) int {
 	fs := flag.NewFlagSet("pinbumper "+cmd, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var (
-		composeFiles  multiFlag
-		portainerURL  = fs.String("portainer-url", envOr("PORTAINER_URL", ""), "Portainer CE base URL (PORTAINER_URL; LAN HTTP is fine; Cloudflare can hang)")
-		apiKeyFile    = fs.String("api-key-file", os.Getenv("PORTAINER_API_KEY_FILE"), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
-		stacks        multiFlag
-		healthTimeout = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
-		httpTimeout   = fs.Duration("http-timeout", 60*time.Second, "HTTP timeout for tag listing and Portainer GET")
-		deployTimeout = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
-		tlsSkip       = fs.Bool("tls-skip-verify", false, "skip TLS verify for Portainer only (LAN HTTPS)")
-		skipDeploy    = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
+		composeFiles       multiFlag
+		portainerURL       = fs.String("portainer-url", envOr("PORTAINER_URL", ""), "Portainer CE base URL (PORTAINER_URL; LAN HTTP is fine; Cloudflare can hang)")
+		apiKeyFile         = fs.String("api-key-file", os.Getenv("PORTAINER_API_KEY_FILE"), "file containing the Portainer X-API-Key (PORTAINER_API_KEY_FILE)")
+		stacks             multiFlag
+		healthTimeout      = fs.Duration("health-timeout", 10*time.Minute, "how long to wait for healthchecks after apply")
+		httpTimeout        = fs.Duration("http-timeout", 60*time.Second, "HTTP timeout for tag listing and Portainer GET")
+		deployTimeout      = fs.Duration("deploy-timeout", 30*time.Minute, "HTTP timeout for Portainer PUT pull+redeploy (0 = none)")
+		deployWaitTimeout  = fs.Duration("deploy-wait-timeout", portainer.DefaultDeployWaitTimeout, "how long to poll Portainer stack Status after PUT")
+		deployWaitInterval = fs.Duration("deploy-wait-interval", portainer.DefaultDeployWaitInterval, "poll interval for Portainer stack Status after PUT")
+		tlsSkip            = fs.Bool("tls-skip-verify", false, "skip TLS verify for Portainer only (LAN HTTPS)")
+		skipDeploy         = fs.Bool("skip-deploy", false, "rewrite local files only; do not compose up or Portainer PUT")
 	)
 	fs.Var(&composeFiles, "compose-file", "local Compose file to scan (repeatable)")
 	fs.Var(&stacks, "stack", "limit Portainer discovery to these stack names (repeatable)")
 	if err := fs.Parse(rest); err != nil {
+		return 2
+	}
+
+	if *deployWaitTimeout <= 0 || *deployWaitInterval <= 0 {
+		fmt.Fprintln(os.Stderr, "--deploy-wait-timeout and --deploy-wait-interval must be positive")
 		return 2
 	}
 
@@ -62,16 +69,18 @@ func runMain(args []string) int {
 	registryClient := &http.Client{Timeout: *httpTimeout}
 	reg := registry.NewClient(registryClient)
 	opt := run.Options{
-		Mode:          mode,
-		ComposeFiles:  composeFiles,
-		StackFilter:   stacks,
-		Tags:          reg,
-		Digests:       reg,
-		SkipDeploy:    *skipDeploy,
-		PullImage:     true,
-		HealthTimeout: *healthTimeout,
-		Stdout:        os.Stdout,
-		Stderr:        os.Stderr,
+		Mode:               mode,
+		ComposeFiles:       composeFiles,
+		StackFilter:        stacks,
+		Tags:               reg,
+		Digests:            reg,
+		SkipDeploy:         *skipDeploy,
+		PullImage:          true,
+		HealthTimeout:      *healthTimeout,
+		DeployWaitTimeout:  *deployWaitTimeout,
+		DeployWaitInterval: *deployWaitInterval,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	}
 	if !*skipDeploy {
 		opt.Deploy = run.DockerDeployer{}
@@ -200,11 +209,13 @@ Portainer auth (either option):
   --stack NAME                Limit to these stack names (repeatable)
 
 Apply:
-  --health-timeout DURATION   Wait for healthchecks (default 10m). No rollback.
-  --skip-deploy               Rewrite local files only; no compose up, no Portainer PUT
-  --http-timeout DURATION     Tag listing / Portainer GET (default 60s)
-  --deploy-timeout DURATION   Portainer PUT pull+redeploy (default 30m; 0 = none)
-  --tls-skip-verify           Skip TLS verify for Portainer only (LAN HTTPS)
+  --health-timeout DURATION        Healthcheck wait after deploy success (default 10m). No rollback.
+  --skip-deploy                    Rewrite local files only; no compose up, no Portainer PUT
+  --http-timeout DURATION          Tag listing / Portainer GET (default 60s)
+  --deploy-timeout DURATION        HTTP timeout for Portainer PUT (default 30m; 0 = none)
+  --deploy-wait-timeout DURATION   Poll deadline after Portainer PUT (default 20m; must be positive)
+  --deploy-wait-interval DURATION  Stack Status poll interval (default 5s; must be positive)
+  --tls-skip-verify                Skip TLS verify for Portainer only (LAN HTTPS)
 
 Environment:
   PORTAINER_URL, PORTAINER_API_KEY, PORTAINER_API_KEY_FILE
